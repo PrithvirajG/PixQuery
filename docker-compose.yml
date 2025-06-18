@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7
+    container_name: pixquery-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  pixquery:
+    build: ./backend
+    container_name: pixquery-monitor
+    volumes:
+      - ~/pixquery_photos:/watched_photos       # 👈 mount local folder to container
+#      - ./backend/pixquery.db:/app/pixquery.db  # optional: persist DB to host
+    environment:
+      - MONITOR_PATH=/watched_photos            # 👈 use this in your script
+    depends_on:
+      - redis
+
+volumes:
+  redis-data:
