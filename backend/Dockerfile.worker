@@ -10,10 +10,9 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-#COPY ./src /app/src
-COPY requirements.txt .
+COPY ./src /app/src
+COPY requirements.worker.txt .
 
-RUN pip install -r requirements.txt
-COPY . /app
+RUN pip install --no-cache-dir -r requirements.worker.txt
 
 CMD ["python", "src/worker/start_worker.py"]

@@ -6,20 +6,42 @@ services:
     container_name: pixquery-redis
     ports:
       - "6379:6379"
-    volumes:
-      - redis-data:/data
     restart: unless-stopped
 
-  pixquery:
-    build: ./backend
+  monitor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: pixquery-monitor
+    command: python src/ingestion/monitor.py
     volumes:
-      - ~/pixquery_photos:/watched_photos       # 👈 mount local folder to container
-#      - ./backend/pixquery.db:/app/pixquery.db  # optional: persist DB to host
+      - ~/pixquery_photos:/watched_photos
+      - ./pixquery_data:/app/data
     environment:
-      - MONITOR_PATH=/watched_photos            # 👈 use this in your script
+      - MONITOR_PATH=/watched_photos
+      - DB_PATH=/app/data/pixquery.db
+      - PYTHONPATH=/app
+
     depends_on:
       - redis
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pixquery-worker
+    command: python src/processing/worker.py
+    volumes:
+      - ~/pixquery_photos:/watched_photos  # if needed for processing
+      - ./pixquery_data:/app/data
+    environment:
+      - DB_PATH=/app/data/pixquery.db
+      - PYTHONPATH=/app
+
+    depends_on:
+      - redis
+    deploy:
+      replicas: 1  # scale easily
 
 volumes:
   redis-data:

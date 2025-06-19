@@ -1,9 +1,8 @@
-watchdog==2.1.9
-torch==2.7.1
-torchvision==0.22.1
+torch==1.12.1
+torchvision==0.13.1
 ultralytics==8.0.0
 git+https://github.com/openai/CLIP.git
-transformers==4.52.4
+transformers==4.21.0
 pillow==9.2.0
 rq==1.11.0
 redis==4.3.4
