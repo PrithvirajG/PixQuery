@@ -21,7 +21,7 @@ class YoloModel(ModelInterface):
         self.model = YOLO(model_path)
         self.logger.info(f"YOLO model has been loaded from path {model_path}")
 
-    def detect(self, image: Image.Image, write_image: bool = False) -> list:
+    def detect(self, image: Image.Image, write_image: bool = False) -> list | None:
         try:
             self.logger.info(f"Performing YOLO object detection on image ...")
             results = self.model(image)
@@ -39,6 +39,7 @@ class YoloModel(ModelInterface):
             return detections
         except Exception as e:
             self.logger.exception(f"Exception during YOLO detection. Reason: {str(e)}")
+            return None
 
     def write_image_with_detections(self, image: Image.Image, detections: list, save_path: str):
         draw = ImageDraw.Draw(image)

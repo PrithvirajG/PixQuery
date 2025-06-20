@@ -23,9 +23,18 @@ class ClipModel(ModelInterface):
             image = self.preprocess(image).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 embedding = self.model.encode_image(image)
-            return embedding.cpu().numpy().flatten()
+            return embedding.cpu().numpy()[0]
         except Exception as e:
-            self.logger.exception(f"Exception during CLIP embedding. Reason: {str(e)}")
+            self.logger.exception(f"Exception during CLIP image embedding. Reason: {str(e)}")
+            return None
+
+    def embed_text(self, text: str):
+        try:
+            tokens = clip.tokenize([text]).to(self.device)
+            with torch.no_grad():
+                return self.model.encode_text(tokens).cpu().numpy().flatten()
+        except Exception as e:
+            self.logger.exception(f"Exception during CLIP text embedding. Reason: {str(e)}")
             return None
 
     def detect(self, image): raise NotImplementedError

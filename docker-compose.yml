@@ -8,40 +8,54 @@ services:
       - "6379:6379"
     restart: unless-stopped
 
-  monitor:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: pixquery-monitor
-    command: python src/ingestion/monitor.py
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - ~/pixquery_photos:/watched_photos
-      - ./pixquery_data:/app/data
-    environment:
-      - MONITOR_PATH=/watched_photos
-      - DB_PATH=/app/data/pixquery.db
-      - PYTHONPATH=/app
+      - ./qdrant_data:/qdrant/storage
 
-    depends_on:
-      - redis
 
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: pixquery-worker
-    command: python src/processing/worker.py
-    volumes:
-      - ~/pixquery_photos:/watched_photos  # if needed for processing
-      - ./pixquery_data:/app/data
-    environment:
-      - DB_PATH=/app/data/pixquery.db
-      - PYTHONPATH=/app
-
-    depends_on:
-      - redis
-    deploy:
-      replicas: 1  # scale easily
+#  monitor:
+#    build:
+#      context: ./backend
+#      dockerfile: Dockerfile
+#    container_name: pixquery-monitor
+#    command: python src/ingestion/monitor.py
+#    volumes:
+#      - ~/pixquery_photos:/watched_photos
+#      - ./pixquery_data:/app/data
+#    environment:
+#      - MONITOR_PATH=/watched_photos
+#      - DB_PATH=/app/data/pixquery.db
+#      - PYTHONPATH=/app
+#
+#    depends_on:
+#      - redis
+#
+#  worker:
+#    build:
+#      context: ./backend
+#      dockerfile: Dockerfile
+#    container_name: pixquery-worker
+#    command: python src/processing/worker.py
+#    volumes:
+#      - ~/pixquery_photos:/watched_photos  # if needed for processing
+#      - ./pixquery_data:/app/data
+#    environment:
+#      - DB_PATH=/app/data/pixquery.db
+#      - PYTHONPATH=/app
+#
+#    depends_on:
+#      - redis
+#    deploy:
+#      replicas: 1  # scale easily
 
 volumes:
   redis-data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+
