@@ -30,6 +30,7 @@ class ClipModel(ModelInterface):
 
     def embed_text(self, text: str):
         try:
+            self.logger.info("Performing CLIP text embedding ...")
             tokens = clip.tokenize([text]).to(self.device)
             with torch.no_grad():
                 return self.model.encode_text(tokens).cpu().numpy().flatten()
