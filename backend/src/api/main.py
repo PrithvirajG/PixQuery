@@ -1,10 +1,7 @@
-# src/api/main.py
 import os
 
 from fastapi import FastAPI
-# from src.query.search import search_images, search_image_descriptions
 from src.repositories.sqlite.sqlite_database_manager import SQLDatabaseManager
-from src.storage.sqlite_db import get_unprocessed_images
 from src.processing.processor import process_image
 import sqlite3
 import json

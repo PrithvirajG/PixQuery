@@ -1,3 +1,7 @@
 .venv
 .vscode
 .idea
+*.log
+*.db
+node_modules
+qdrant_data

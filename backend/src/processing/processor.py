@@ -6,7 +6,6 @@ from .models.yolo import YoloModel
 from .models.clip import ClipModel
 from .models.blip import BlipModel
 from src.storage.qdrant_db import init_qdrant, insert_image_embedding, insert_text_embedding
-from src.processing.models.model_registry import model_registry
 import logging
 
 from ..repositories.i_database_manager import IDatabaseManager
@@ -19,9 +18,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("Generic")
-# sql_database = SQLiteHandler(db_path='pixquery.db')
-# database_manager: IDatabaseManager = SQLDatabaseManager(sql_database)
-# qdrant_client = init_qdrant()
+
 
 _yolo = None
 _clip = None
@@ -29,22 +26,6 @@ _blip = None
 _database_manager = None
 _qdrant_client = None
 
-def get_resources():
-    global _yolo, _clip, _blip, _database_manager, _qdrant_client
-
-    if _yolo is None:
-        _yolo = model_registry.yolo
-    if _clip is None:
-        _clip = model_registry.clip
-    if _blip is None:
-        _blip = model_registry.blip
-    if _database_manager is None:
-        sql_database = SQLiteHandler(db_path='pixquery.db')
-        _database_manager = SQLDatabaseManager(sql_database)
-    if _qdrant_client is None:
-        _qdrant_client = init_qdrant()
-
-    return _yolo, _clip, _blip, _database_manager, _qdrant_client
 
 def process_image(image_path: str, db_path='pixquery.db', collection_name='image_embeddings'):
     try:
