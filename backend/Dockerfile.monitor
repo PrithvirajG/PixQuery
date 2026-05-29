@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY ./src /app/src
+COPY monitoring_main.py .
 COPY requirements.monitor.txt .
 
 RUN pip install --no-cache-dir -r requirements.monitor.txt
 
-CMD ["python", "src/ingestion/monitor.py"]
+CMD ["python", "monitoring_main.py"]

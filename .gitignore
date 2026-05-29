@@ -3,5 +3,7 @@
 .idea
 *.log
 *.db
+__pycache__/
+*.py[cod]
 node_modules
 qdrant_data

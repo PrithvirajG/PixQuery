@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY ./src /app/src
+COPY worker_main.py .
 COPY requirements.worker.txt .
 
 RUN pip install --no-cache-dir -r requirements.worker.txt
 
-CMD ["python", "src/worker/start_worker.py"]
+CMD ["python", "worker_main.py"]

@@ -1,8 +1,8 @@
-torch==1.12.1
-torchvision==0.13.1
-ultralytics==8.0.0
+aio-pika==9.4.3
+pymongo==4.7.3
+torch>=2.9.0
+torchvision
+ultralytics>=8.3,<8.4
 git+https://github.com/openai/CLIP.git
-transformers==4.21.0
-pillow==9.2.0
-rq==1.11.0
-redis==4.3.4
+transformers==4.52.4
+pillow>=10.0.0

@@ -1,72 +1,83 @@
-version: "3.8"
+networks:
+  pixquery_net:
+    external: true
+    name: pixquery_net
 
 services:
-  redis:
-    image: redis:7
-    container_name: pixquery-redis
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pixquery-api
+    command: uvicorn api_main:app --host 0.0.0.0 --port 8000 --reload
     ports:
-      - "6379:6379"
-    restart: unless-stopped
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: pixquery-rabbitmq
-    ports:
-      - "5672:5672"     # AMQP (for aio-pika / your code)
-      - "15672:15672"   # Management UI (access it at http://localhost:15672)
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant:v1.14.1
-    container_name: qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "8000:8000"
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - ./backend:/app
+      - ${PIXQUERY_PHOTOS:-~/pixquery_photos}:/data/photos
+    environment:
+      PYTHONPATH: /app
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: pixquery
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      RABBITMQ_QUEUE: image_task
+      WEAVIATE_URL: http://weaviate:8080
+      WATCH_ROOT: /data/photos
+    networks:
+      - pixquery_net
 
+  ingestor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.monitor
+    container_name: pixquery-ingestor
+    command: python monitoring_main.py
+    volumes:
+      - ./backend:/app
+      - ${PIXQUERY_PHOTOS:-~/pixquery_photos}:/data/photos
+    environment:
+      PYTHONPATH: /app
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: pixquery
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      RABBITMQ_QUEUE: image_task
+      WATCH_ROOT: /data/photos
+      WATCH_ROOT_ID: local_photos
+    networks:
+      - pixquery_net
 
-#  monitor:
-#    build:
-#      context: ./backend
-#      dockerfile: Dockerfile
-#    container_name: pixquery-monitor
-#    command: python src/ingestion/monitor.py
-#    volumes:
-#      - ~/pixquery_photos:/watched_photos
-#      - ./pixquery_data:/app/data
-#    environment:
-#      - MONITOR_PATH=/watched_photos
-#      - DB_PATH=/app/data/pixquery.db
-#      - PYTHONPATH=/app
-#
-#    depends_on:
-#      - redis
-#
-#  worker:
-#    build:
-#      context: ./backend
-#      dockerfile: Dockerfile
-#    container_name: pixquery-worker
-#    command: python src/processing/worker.py
-#    volumes:
-#      - ~/pixquery_photos:/watched_photos  # if needed for processing
-#      - ./pixquery_data:/app/data
-#    environment:
-#      - DB_PATH=/app/data/pixquery.db
-#      - PYTHONPATH=/app
-#
-#    depends_on:
-#      - redis
-#    deploy:
-#      replicas: 1  # scale easily
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: pixquery-worker
+    command: python worker_main.py
+    volumes:
+      - ./backend:/app
+      - ${PIXQUERY_PHOTOS:-~/pixquery_photos}:/data/photos
+    environment:
+      PYTHONPATH: /app
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: pixquery
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      RABBITMQ_QUEUE: image_task
+      WEAVIATE_URL: http://weaviate:8080
+      WATCH_ROOT: /data/photos
+    networks:
+      - pixquery_net
 
-volumes:
-  redis-data:
-  etcd_data:
-  minio_data:
-  milvus_data:
-
+  frontend:
+    image: node:20
+    container_name: pixquery-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      - api
+    networks:
+      - pixquery_net
