@@ -27,6 +27,11 @@ class _Cursor:
         return iter(deepcopy(self.docs))
 
 
+class _DeleteResult:
+    def __init__(self, deleted_count: int):
+        self.deleted_count = deleted_count
+
+
 class _MemoryCollection:
     def __init__(self):
         self.docs: list[dict[str, Any]] = []
@@ -34,8 +39,27 @@ class _MemoryCollection:
     def create_index(self, *args, **kwargs):
         return None
 
+    def drop_index(self, *args, **kwargs):
+        return None
+
     def insert_one(self, doc):
         self.docs.append(deepcopy(doc))
+
+    def count_documents(self, query):
+        return sum(1 for doc in self.docs if _matches(doc, query))
+
+    def delete_one(self, query):
+        for i, doc in enumerate(self.docs):
+            if _matches(doc, query):
+                del self.docs[i]
+                return _DeleteResult(1)
+        return _DeleteResult(0)
+
+    def delete_many(self, query):
+        kept = [doc for doc in self.docs if not _matches(doc, query)]
+        removed = len(self.docs) - len(kept)
+        self.docs = kept
+        return _DeleteResult(removed)
 
     def find_one(self, query):
         for doc in self.docs:
@@ -85,9 +109,27 @@ class InMemoryPipelineRepository(MongoPipelineRepository):
 
 
 def _matches(doc, query):
+    import re
+
     for key, value in query.items():
         if key == "$or":
             if not any(_matches(doc, branch) for branch in value):
+                return False
+        elif "." in key:
+            # Dot-notation, including "array.field" semantics (match if any element matches).
+            head, tail = key.split(".", 1)
+            container = doc.get(head)
+            if isinstance(container, list):
+                if not any(_matches(item, {tail: value}) for item in container):
+                    return False
+            elif isinstance(container, dict):
+                if not _matches(container, {tail: value}):
+                    return False
+            else:
+                return False
+        elif isinstance(value, dict) and "$regex" in value:
+            flags = re.IGNORECASE if "i" in value.get("$options", "") else 0
+            if not re.search(value["$regex"], str(doc.get(key, "")), flags):
                 return False
         elif isinstance(value, dict) and "$nin" in value:
             if doc.get(key) in value["$nin"]:

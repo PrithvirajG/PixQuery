@@ -2,6 +2,7 @@ watchdog==2.1.9
 aio-pika==9.4.3
 fastapi==0.111.0
 pymongo==4.7.3
+pydantic>=2.7,<3
 uvicorn[standard]==0.30.1
 torch>=2.9.0
 torchvision

@@ -6,6 +6,7 @@ from src.pipelines.ingestion.reconciler import (
     FileNotStableError,
     FilesystemReconciler,
     Publisher,
+    pipeline_version_hash,
     sha256_file,
     wait_for_stable_file,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "FilesystemReconciler",
     "ImageEventHandler",
     "Publisher",
+    "pipeline_version_hash",
     "sha256_file",
     "start_monitoring",
     "wait_for_stable_file",

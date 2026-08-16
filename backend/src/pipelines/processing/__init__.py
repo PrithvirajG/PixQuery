@@ -3,11 +3,19 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.pipelines.processing.pipeline import DefaultImageAnalysisPipeline
+    from src.pipelines.processing.pipeline import (
+        DefaultImageAnalysisPipeline,
+        DynamicPipeline,
+    )
     from src.pipelines.processing.rmq_processor import ImageProcessorConsumer
     from src.pipelines.processing.worker import start_worker
 
-__all__ = ["DefaultImageAnalysisPipeline", "ImageProcessorConsumer", "start_worker"]
+__all__ = [
+    "DefaultImageAnalysisPipeline",
+    "DynamicPipeline",
+    "ImageProcessorConsumer",
+    "start_worker",
+]
 
 
 def __getattr__(name):
@@ -15,6 +23,10 @@ def __getattr__(name):
         from src.pipelines.processing.pipeline import DefaultImageAnalysisPipeline
 
         return DefaultImageAnalysisPipeline
+    if name == "DynamicPipeline":
+        from src.pipelines.processing.pipeline import DynamicPipeline
+
+        return DynamicPipeline
     if name == "ImageProcessorConsumer":
         from src.pipelines.processing.rmq_processor import ImageProcessorConsumer
 

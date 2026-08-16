@@ -16,12 +16,12 @@ logging.basicConfig(
 class ImageProcessorConsumer(RabbitConsumer):
     def __init__(self):
         super().__init__()
-        from src.pipelines.processing import DefaultImageAnalysisPipeline
+        from src.pipelines.processing import DynamicPipeline
 
         self.logger = logging.getLogger("ImageProcessorConsumer")
         self.repository = MongoPipelineRepository.from_uri(MONGO_URI, MONGO_DB_NAME)
         self.embedding_store = WeaviateEmbeddingStore()
-        self.pipeline = DefaultImageAnalysisPipeline(embedding_store=self.embedding_store)
+        self.pipeline = DynamicPipeline(embedding_store=self.embedding_store)
 
     async def on_message(self, message):
         async with message.process(requeue=False):
