@@ -100,7 +100,7 @@ Flow:
 
 Strengths:
 
-- Uses content hashes for deduplication/idempotency.
+- Uses content hashes for deduplication/idempotency. *(Update 2026-05-30: dedup is now **per workspace** — asset identity is `(workspace_id, content_sha256)`, so the same image in different workspaces is processed independently. See [[Workspace Sharing & Access Control]].)*
 - Separates asset identity from workspace path observations.
 - Handles missing files and refreshes active asset status.
 - Waits for stable files before processing.

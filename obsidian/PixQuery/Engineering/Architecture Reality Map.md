@@ -137,6 +137,8 @@ Gaps:
 
 **Observed:** Partially implemented.
 
+> **Update (2026-05-30):** Superseded — isolation is now by **workspace membership** with shareable workspaces and RBAC (owner/editor/viewer), and processing is workspace-scoped. This also fixed a first-writer-wins `owner_id` bug. See [[Workspace Sharing & Access Control]].
+
 Evidence:
 
 - `users` collection.
