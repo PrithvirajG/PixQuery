@@ -1,0 +1,107 @@
+/* Aperture global styles — grain, vignette, hover lift, scrollbars, pulse. */
+
+.ap-screen * {
+  box-sizing: border-box;
+}
+.ap-screen {
+  font-family: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.ap-photo {
+  position: relative;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+}
+.ap-photo::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.07;
+  mix-blend-mode: overlay;
+}
+.ap-photo > .ap-vig {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.35), inset 0 -30px 50px rgba(0, 0, 0, 0.28);
+  border-radius: inherit;
+}
+
+.ap-cell {
+  transition: transform 0.16s cubic-bezier(0.2, 0.7, 0.3, 1), box-shadow 0.16s;
+}
+.ap-cell:hover {
+  transform: translateY(-3px);
+}
+.ap-cell:hover .ap-photo {
+  box-shadow: 0 0 0 1px rgba(140, 124, 247, 0.42), 0 10px 30px rgba(0, 0, 0, 0.5),
+    0 0 22px rgba(124, 108, 247, 0.28);
+}
+
+.ap-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+.ap-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.ap-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.ap-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+  background-clip: padding-box;
+}
+
+.ap-filterrow {
+  transition: color 0.12s;
+}
+.ap-filterrow:hover {
+  color: #edeff7 !important;
+}
+.ap-facet {
+  transition: all 0.14s;
+}
+
+@keyframes apPulse {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+.ap-pulse {
+  animation: apPulse 1.6s ease-in-out infinite;
+}
+@keyframes apBlink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.ap-pulse-dot {
+  animation: apBlink 1s step-end infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ap-pulse {
+    animation: none;
+    opacity: 0;
+  }
+  .ap-pulse-dot {
+    animation: none;
+  }
+}

@@ -1,0 +1,710 @@
+// Aperture kit — shared primitives for the PixQuery hi-fi design system.
+import React from 'react';
+import { AP, STATUS } from './tokens';
+import './aperture.css';
+
+export { AP, STATUS };
+
+// small round status dot
+export const Dot = ({ c = AP.lumen, size = 7, glow = false }) => (
+  <span
+    style={{
+      display: 'inline-block',
+      width: size,
+      height: size,
+      borderRadius: 99,
+      background: c,
+      flex: '0 0 auto',
+      boxShadow: glow ? `0 0 8px ${c}` : 'none',
+    }}
+  />
+);
+
+// keyboard hint chip — ⌘K
+export const Kbd = ({ children }) => (
+  <span
+    style={{
+      fontFamily: AP.mono,
+      fontSize: 11,
+      color: AP.ink3,
+      lineHeight: 1,
+      padding: '4px 7px',
+      borderRadius: 6,
+      background: 'rgba(255,255,255,0.04)',
+      border: `1px solid ${AP.line2}`,
+      whiteSpace: 'nowrap',
+      flex: '0 0 auto',
+    }}
+  >
+    {children}
+  </span>
+);
+
+export const MagIcon = ({ size = 16, c = AP.ink3 }) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flex: '0 0 auto' }}>
+    <circle cx="7" cy="7" r="4.5" stroke={c} strokeWidth="1.6" />
+    <line x1="10.5" y1="10.5" x2="14" y2="14" stroke={c} strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+
+// aperture brand mark — concentric ring with Lumen glow
+export const ApertureMark = ({ size = 22 }) => (
+  <span
+    style={{
+      position: 'relative',
+      width: size,
+      height: size,
+      borderRadius: 99,
+      flex: '0 0 auto',
+      background: AP.lumenGrad,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      boxShadow: `0 0 0 1px ${AP.lumenLine}, 0 0 16px rgba(124,108,247,.55)`,
+    }}
+  >
+    <span
+      style={{
+        width: size * 0.34,
+        height: size * 0.34,
+        borderRadius: 99,
+        background: AP.base,
+        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,.25)',
+      }}
+    />
+  </span>
+);
+
+// ── buttons ──
+export const GhostBtn = ({ children, onClick, style = {}, title, disabled, type = 'button' }) => (
+  <button
+    type={type}
+    onClick={onClick}
+    title={title}
+    disabled={disabled}
+    style={{
+      fontFamily: AP.sans,
+      fontSize: 13,
+      fontWeight: 500,
+      color: AP.ink2,
+      background: 'rgba(255,255,255,0.03)',
+      border: `1px solid ${AP.line2}`,
+      borderRadius: 9,
+      padding: '7px 12px',
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.5 : 1,
+      whiteSpace: 'nowrap',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      transition: 'all .14s',
+      ...style,
+    }}
+    onMouseEnter={(e) => {
+      if (disabled) return;
+      e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+      e.currentTarget.style.color = AP.ink;
+    }}
+    onMouseLeave={(e) => {
+      e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+      e.currentTarget.style.color = AP.ink2;
+    }}
+  >
+    {children}
+  </button>
+);
+
+export const LumenBtn = ({ children, onClick, style = {}, disabled, type = 'button' }) => (
+  <button
+    type={type}
+    onClick={onClick}
+    disabled={disabled}
+    style={{
+      fontFamily: AP.sans,
+      fontSize: 13,
+      fontWeight: 600,
+      color: '#fff',
+      background: AP.lumenGrad,
+      border: 'none',
+      borderRadius: 9,
+      padding: '8px 16px',
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.55 : 1,
+      whiteSpace: 'nowrap',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 7,
+      boxShadow: '0 2px 14px rgba(99,102,241,.4)',
+      transition: 'transform .12s, box-shadow .14s',
+      ...style,
+    }}
+    onMouseEnter={(e) => {
+      if (disabled) return;
+      e.currentTarget.style.boxShadow = '0 4px 22px rgba(99,102,241,.6)';
+      e.currentTarget.style.transform = 'translateY(-1px)';
+    }}
+    onMouseLeave={(e) => {
+      e.currentTarget.style.boxShadow = '0 2px 14px rgba(99,102,241,.4)';
+      e.currentTarget.style.transform = 'none';
+    }}
+  >
+    {children}
+  </button>
+);
+
+export const IconBtn = ({ children, onClick, title, active = false }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={title}
+    style={{
+      width: 34,
+      height: 34,
+      borderRadius: 9,
+      cursor: 'pointer',
+      flex: '0 0 auto',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: AP.sans,
+      fontSize: 15,
+      color: active ? AP.lumenSoft : AP.ink2,
+      background: active ? AP.lumenBg : 'rgba(255,255,255,0.03)',
+      border: `1px solid ${active ? AP.lumenLine : AP.line2}`,
+      transition: 'all .14s',
+    }}
+    onMouseEnter={(e) => {
+      if (!active) {
+        e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+        e.currentTarget.style.color = AP.ink;
+      }
+    }}
+    onMouseLeave={(e) => {
+      if (!active) {
+        e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+        e.currentTarget.style.color = AP.ink2;
+      }
+    }}
+  >
+    {children}
+  </button>
+);
+
+// small ghost action button (Edit / Statistics / Retry rows)
+export const ActBtn = ({ children, onClick, accent = false, title, disabled }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={title}
+    disabled={disabled}
+    style={{
+      fontFamily: AP.sans,
+      fontSize: 12.5,
+      fontWeight: 600,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      whiteSpace: 'nowrap',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '7px 13px',
+      borderRadius: 9,
+      transition: 'all .14s',
+      opacity: disabled ? 0.5 : 1,
+      color: accent ? AP.lumenSoft : AP.ink2,
+      background: accent ? AP.lumenBg : 'rgba(255,255,255,0.03)',
+      border: `1px solid ${accent ? AP.lumenLine : AP.line2}`,
+      flex: '0 0 auto',
+    }}
+    onMouseEnter={(e) => {
+      if (disabled) return;
+      e.currentTarget.style.background = accent ? AP.lumenBg2 : 'rgba(255,255,255,0.08)';
+      if (!accent) e.currentTarget.style.color = AP.ink;
+    }}
+    onMouseLeave={(e) => {
+      e.currentTarget.style.background = accent ? AP.lumenBg : 'rgba(255,255,255,0.03)';
+      if (!accent) e.currentTarget.style.color = AP.ink2;
+    }}
+  >
+    {children}
+  </button>
+);
+
+// pipeline on/off toggle switch
+export const Toggle = ({ on, onClick, title }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={title}
+    aria-pressed={on}
+    style={{
+      width: 36,
+      height: 21,
+      borderRadius: 99,
+      cursor: 'pointer',
+      flex: '0 0 auto',
+      padding: 2,
+      border: 'none',
+      position: 'relative',
+      transition: 'background .16s',
+      background: on ? AP.lumenGrad : 'rgba(255,255,255,0.1)',
+      boxShadow: on ? '0 0 12px rgba(124,108,247,.5)' : 'inset 0 0 0 1px rgba(255,255,255,.08)',
+    }}
+  >
+    <span
+      style={{
+        display: 'block',
+        width: 17,
+        height: 17,
+        borderRadius: 99,
+        background: '#fff',
+        transform: on ? 'translateX(15px)' : 'translateX(0)',
+        transition: 'transform .16s cubic-bezier(.2,.7,.3,1)',
+        boxShadow: '0 1px 3px rgba(0,0,0,.4)',
+      }}
+    />
+  </button>
+);
+
+// ── Match-reason chip — the signature element. 3 carried styles. ──
+export function Chip({ reason, score, variant = 'pill', size = 'md' }) {
+  const fs = size === 'sm' ? 11.5 : 12.5;
+  if (variant === 'badge') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start', maxWidth: '90%' }}>
+        {score != null && (
+          <span
+            style={{
+              fontFamily: AP.mono,
+              fontSize: 11,
+              fontWeight: 600,
+              color: '#fff',
+              background: AP.lumenGrad,
+              borderRadius: 6,
+              padding: '2px 7px',
+              lineHeight: 1.3,
+              boxShadow: '0 2px 8px rgba(99,102,241,.55)',
+            }}
+          >
+            {score}
+          </span>
+        )}
+        <span
+          style={{
+            fontFamily: AP.sans,
+            fontSize: 11.5,
+            fontWeight: 500,
+            color: '#fff',
+            background: 'rgba(10,11,18,.6)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            border: '1px solid rgba(255,255,255,.16)',
+            borderRadius: 7,
+            padding: '3px 8px',
+            lineHeight: 1.3,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            maxWidth: '100%',
+          }}
+        >
+          {reason}
+        </span>
+      </div>
+    );
+  }
+  if (variant === 'underline') {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, maxWidth: '100%' }}>
+        <span
+          style={{
+            fontFamily: AP.sans,
+            fontSize: fs,
+            fontWeight: 500,
+            color: AP.ink,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            backgroundImage: AP.lumenGrad,
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: '0 100%',
+            backgroundSize: '100% 2px',
+            paddingBottom: 2,
+          }}
+        >
+          {reason}
+        </span>
+        {score != null && (
+          <span style={{ fontFamily: AP.mono, fontSize: fs - 2, fontWeight: 500, color: AP.lumenSoft, flex: '0 0 auto' }}>
+            {score}
+          </span>
+        )}
+      </span>
+    );
+  }
+  // pill (default)
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        maxWidth: '100%',
+        background: AP.lumenBg,
+        border: `1px solid ${AP.lumenLine}`,
+        borderRadius: 999,
+        padding: '3px 9px 3px 8px',
+        lineHeight: 1,
+        boxShadow: '0 0 0 1px rgba(124,108,247,.06)',
+      }}
+    >
+      <Dot c={AP.lumen} size={6} glow />
+      <span
+        style={{
+          fontFamily: AP.sans,
+          fontSize: fs,
+          fontWeight: 500,
+          color: AP.lumenSoft,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {reason}
+      </span>
+      {score != null && (
+        <span
+          style={{
+            fontFamily: AP.mono,
+            fontSize: fs - 2.5,
+            fontWeight: 500,
+            color: AP.lumen,
+            opacity: 0.85,
+            flex: '0 0 auto',
+          }}
+        >
+          {score}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// section eyebrow label (mono, faint, tracked)
+export const Eyebrow = ({ children, c = AP.ink3, style = {} }) => (
+  <span
+    style={{
+      fontFamily: AP.mono,
+      fontSize: 10.5,
+      fontWeight: 500,
+      letterSpacing: '.09em',
+      textTransform: 'uppercase',
+      color: c,
+      ...style,
+    }}
+  >
+    {children}
+  </span>
+);
+
+// dropdown-style header control (sort / group)
+export const SelectControl = ({ label, value, active = false, accent = false, onClick, title }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    title={title}
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 7,
+      cursor: 'pointer',
+      padding: '6px 11px',
+      borderRadius: 9,
+      fontFamily: AP.sans,
+      transition: 'all .14s',
+      background: active ? AP.lumenBg2 : 'rgba(255,255,255,0.03)',
+      border: `1px solid ${active ? AP.lumenLine : AP.line2}`,
+    }}
+    onMouseEnter={(e) => {
+      if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+    }}
+    onMouseLeave={(e) => {
+      if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+    }}
+  >
+    <span
+      style={{
+        fontFamily: AP.mono,
+        fontSize: 10,
+        letterSpacing: '.06em',
+        textTransform: 'uppercase',
+        color: active || accent ? AP.lumenSoft : AP.ink3,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+      }}
+    >
+      {accent && <span style={{ fontSize: 11, color: AP.lumen }}>✦</span>}
+      {label}
+    </span>
+    <span style={{ fontSize: 13, fontWeight: 600, color: active || accent ? '#fff' : AP.ink }}>{value}</span>
+    <span style={{ fontSize: 10, color: active || accent ? AP.lumenSoft : AP.ink3 }}>▾</span>
+  </button>
+);
+
+// health status pill
+export function HealthPill({ state = 'ok', label, sm = false }) {
+  const s = STATUS[state] || STATUS.idle;
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        flex: '0 0 auto',
+        background: s.bg,
+        border: `1px solid ${s.line}`,
+        borderRadius: 99,
+        padding: sm ? '2px 8px 2px 7px' : '3px 10px 3px 8px',
+      }}
+    >
+      <Dot c={s.c} size={6} glow={state === 'run'} />
+      <span style={{ fontFamily: AP.sans, fontSize: sm ? 11 : 12, fontWeight: 500, color: s.c }}>{label}</span>
+    </span>
+  );
+}
+
+// progress / coverage bar. `pulse` adds a moving sheen for live jobs.
+export function Bar({ v = 0.5, c, h = 5, pulse = false, track = 'rgba(255,255,255,0.09)' }) {
+  return (
+    <span style={{ display: 'block', width: '100%', height: h, borderRadius: 99, background: track, overflow: 'hidden' }}>
+      <span
+        style={{
+          display: 'block',
+          height: '100%',
+          width: `${Math.round(Math.min(Math.max(v, 0), 1) * 100)}%`,
+          borderRadius: 99,
+          background: c || AP.lumenGrad,
+          position: 'relative',
+          overflow: 'hidden',
+        }}
+      >
+        {pulse && (
+          <span
+            className="ap-pulse"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'linear-gradient(90deg, transparent, rgba(255,255,255,.5), transparent)',
+            }}
+          />
+        )}
+      </span>
+    </span>
+  );
+}
+
+// labeled stat
+export const StatBlock = ({ label, value, sub, accent = false }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+    <Eyebrow>{label}</Eyebrow>
+    <span
+      style={{
+        fontFamily: AP.sans,
+        fontSize: 19,
+        fontWeight: 600,
+        color: accent ? AP.lumenSoft : AP.ink,
+        lineHeight: 1.1,
+      }}
+    >
+      {value}
+    </span>
+    {sub && <span style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3 }}>{sub}</span>}
+  </div>
+);
+
+// circular coverage ring (conic gradient)
+export function MetricRing({ v = 0.5, size = 52, label }) {
+  const pct = Math.round(Math.min(Math.max(v, 0), 1) * 100);
+  return (
+    <span
+      style={{
+        position: 'relative',
+        width: size,
+        height: size,
+        flex: '0 0 auto',
+        borderRadius: 99,
+        background: `conic-gradient(${AP.lumen} ${pct}%, rgba(255,255,255,0.08) 0)`,
+        display: 'inline-block',
+      }}
+    >
+      <span
+        style={{
+          position: 'absolute',
+          inset: 5,
+          borderRadius: 99,
+          background: AP.card,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+        }}
+      >
+        <span style={{ fontFamily: AP.mono, fontSize: 12, fontWeight: 600, color: AP.ink }}>{pct}</span>
+        {label && (
+          <span style={{ fontFamily: AP.mono, fontSize: 7.5, color: AP.ink3, letterSpacing: '.04em' }}>{label}</span>
+        )}
+      </span>
+    </span>
+  );
+}
+
+// Counter card (pipeline stats)
+export function Counter({ label, value, sub, c = AP.ink, accent }) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        minWidth: 0,
+        padding: '15px 16px',
+        borderRadius: 13,
+        background: AP.card,
+        border: `1px solid ${accent ? accent.line : AP.line2}`,
+      }}
+    >
+      <Eyebrow c={accent ? accent.c : AP.ink3}>{label}</Eyebrow>
+      <div style={{ fontFamily: AP.sans, fontSize: 25, fontWeight: 600, color: c, lineHeight: 1.15, marginTop: 4 }}>
+        {value}
+      </div>
+      {sub && <div style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// photo frame — real thumbnail with Aperture grain + vignette treatment
+export function Photo({ src, alt = '', style = {}, badge, children, radius = 12 }) {
+  return (
+    <div className="ap-photo" style={{ borderRadius: radius, background: AP.cardHi, ...style }}>
+      {src && (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+          onError={(e) => {
+            e.target.style.display = 'none';
+          }}
+        />
+      )}
+      <span className="ap-vig" />
+      {badge && <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 2 }}>{badge}</div>}
+      {children}
+    </div>
+  );
+}
+
+// ── nav icons (minimal stroke primitives) ──
+export const IconSearch = ({ s = 20, c }) => (
+  <svg width={s} height={s} viewBox="0 0 20 20" fill="none">
+    <circle cx="8.5" cy="8.5" r="5" stroke={c} strokeWidth="1.7" />
+    <line x1="12.5" y1="12.5" x2="17" y2="17" stroke={c} strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
+export const IconWorkspaces = ({ s = 20, c }) => (
+  <svg width={s} height={s} viewBox="0 0 20 20" fill="none">
+    <rect x="2.5" y="2.5" width="6.4" height="6.4" rx="1.6" stroke={c} strokeWidth="1.7" />
+    <rect x="11.1" y="2.5" width="6.4" height="6.4" rx="1.6" stroke={c} strokeWidth="1.7" />
+    <rect x="2.5" y="11.1" width="6.4" height="6.4" rx="1.6" stroke={c} strokeWidth="1.7" />
+    <rect x="11.1" y="11.1" width="6.4" height="6.4" rx="1.6" stroke={c} strokeWidth="1.7" />
+  </svg>
+);
+export const IconPipelines = ({ s = 20, c }) => (
+  <svg width={s} height={s} viewBox="0 0 20 20" fill="none">
+    <circle cx="4" cy="5" r="2.3" stroke={c} strokeWidth="1.7" />
+    <circle cx="4" cy="15" r="2.3" stroke={c} strokeWidth="1.7" />
+    <circle cx="16" cy="10" r="2.3" stroke={c} strokeWidth="1.7" />
+    <path d="M6.2 5.6 Q11 7 13.8 9.2 M6.2 14.4 Q11 13 13.8 10.8" stroke={c} strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+export const IconJobs = ({ s = 20, c }) => (
+  <svg width={s} height={s} viewBox="0 0 20 20" fill="none">
+    <path
+      d="M2.5 11.5 H6 L8 6 L11 15 L13 10 H17.5"
+      stroke={c}
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+// Control Room header — title + breadcrumb + right actions.
+export function ControlHeader({ title, breadcrumb, count, actions, pad = 22 }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 16,
+        padding: `20px ${pad}px 18px`,
+        borderBottom: `1px solid ${AP.line}`,
+        background: AP.panel,
+        flex: '0 0 auto',
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+        <Eyebrow>{breadcrumb}</Eyebrow>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 11 }}>
+          <span style={{ fontFamily: AP.sans, fontSize: 22, fontWeight: 600, letterSpacing: '-0.015em', color: AP.ink }}>
+            {title}
+          </span>
+          {count != null && <span style={{ fontFamily: AP.mono, fontSize: 12, color: AP.ink3 }}>{count}</span>}
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flex: '0 0 auto' }}>{actions}</div>
+    </div>
+  );
+}
+
+// text input in Aperture chrome
+export const ApInput = React.forwardRef(function ApInput({ style = {}, ...props }, ref) {
+  return (
+    <input
+      ref={ref}
+      {...props}
+      style={{
+        fontFamily: AP.sans,
+        fontSize: 13,
+        color: AP.ink,
+        background: AP.card,
+        border: `1px solid ${AP.line2}`,
+        borderRadius: 9,
+        padding: '9px 11px',
+        outline: 'none',
+        width: '100%',
+        ...style,
+      }}
+    />
+  );
+});
+
+// select in Aperture chrome
+export const ApSelect = ({ style = {}, children, ...props }) => (
+  <select
+    {...props}
+    style={{
+      fontFamily: AP.sans,
+      fontSize: 13,
+      color: AP.ink,
+      background: AP.card,
+      border: `1px solid ${AP.line2}`,
+      borderRadius: 9,
+      padding: '9px 11px',
+      outline: 'none',
+      width: '100%',
+      ...style,
+    }}
+  >
+    {children}
+  </select>
+);

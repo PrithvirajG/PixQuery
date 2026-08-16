@@ -1,112 +1,209 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+// SearchView — Aperture hi-fi Search (Gallery). Grid + left filter rail, flat ranked
+// grid with match-reason chips, and a grouped-by-reason mode.
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
-import { Link } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  AP,
+  Dot,
+  Kbd,
+  MagIcon,
+  LumenBtn,
+  GhostBtn,
+  Chip,
+  Eyebrow,
+  SelectControl,
+  Photo,
+} from '../aperture/kit';
 
-const API       = 'http://localhost:8000';
+const API = 'http://localhost:8000';
 const PAGE_SIZE = 24;
 
 const MODES = [
-  { value: 'keyword',  label: 'Keyword',  desc: 'Match on file paths & captions' },
+  { value: 'keyword', label: 'Keyword', desc: 'Match on file paths & captions' },
   { value: 'semantic', label: 'Semantic', desc: 'Vector search via CLIP embeddings' },
-  { value: 'hybrid',   label: 'Hybrid',   desc: 'Keyword + semantic, re-ranked' },
+  { value: 'hybrid', label: 'Hybrid', desc: 'Keyword + semantic, re-ranked' },
 ];
 
-/* ── Image Card ─────────────────────────────────────────────────── */
-function ImageCard({ img }) {
+const FIELD_LABELS = { filename: 'filename', caption: 'caption', ocr: 'image text' };
+
+// Derive the match-reason chip label + score from the backend's match_reason payload.
+function reasonFor(img) {
+  const r = img.match_reason;
+  if (!r) return null;
+  const fields = (r.fields || []).map((f) => FIELD_LABELS[f] || f);
+  const label = fields.length ? `in ${fields.join(' + ')}` : r.mode === 'semantic' ? 'visually similar' : r.mode;
+  const score = typeof r.similarity === 'number' ? Math.round(r.similarity * 100) : null;
+  return { label, score };
+}
+
+function ResultCell({ img, onOpen }) {
+  const reason = reasonFor(img);
   const filename = img.current_path?.split(/[\\/]/).pop() ?? 'Image';
   return (
-    <Link
-      to={`/image/${img._id}`}
-      className="group flex flex-col bg-slate-900/60 border border-slate-800 rounded-2xl
-                 overflow-hidden hover:border-violet-500/40
-                 hover:shadow-[0_0_24px_rgba(139,92,246,0.15)]
-                 transition-all duration-300 backdrop-blur"
-    >
-      <div className="aspect-square bg-slate-800/50 flex items-center justify-center overflow-hidden">
-        <img
-          src={`${API}/images/${img._id}/thumbnail`}
-          alt={filename}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-          onError={e => { e.target.style.display = 'none'; }}
-        />
-      </div>
-      <div className="p-3 flex flex-col gap-1.5">
-        <p className="text-xs font-semibold text-slate-200 truncate" title={filename}>{filename}</p>
-        {img.description && (
-          <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">{img.description}</p>
-        )}
-        <div className="flex items-center justify-between mt-0.5">
-          <span className="text-[10px] text-slate-600">
-            {img.size_bytes ? `${(img.size_bytes / 1024).toFixed(1)} KB` : ''}
+    <div className="ap-cell" style={{ cursor: 'pointer' }} onClick={onOpen} title={filename}>
+      <Photo src={`${API}/images/${img._id}/thumbnail`} alt={filename} style={{ aspectRatio: '4 / 3' }} />
+      <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+        {reason ? (
+          <Chip reason={reason.label} score={reason.score} variant="pill" />
+        ) : (
+          <span
+            style={{
+              fontFamily: AP.mono,
+              fontSize: 11,
+              color: AP.ink3,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {filename}
           </span>
-          {img.score !== undefined && img.score < 1.0 && (
-            <span className="text-[10px] font-bold text-violet-400 bg-violet-900/30
-                             px-2 py-0.5 rounded-full border border-violet-800/40">
-              {(img.score * 100).toFixed(0)}%
-            </span>
-          )}
-        </div>
+        )}
       </div>
-    </Link>
+    </div>
   );
 }
 
-/* ── Main View ──────────────────────────────────────────────────── */
+function FacetPill({ children, onRemove, primary = false }) {
+  return (
+    <span
+      className="ap-facet"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        fontFamily: AP.sans,
+        fontSize: 12.5,
+        fontWeight: 500,
+        color: primary ? AP.ink : AP.ink2,
+        padding: '4px 9px',
+        borderRadius: 8,
+        background: primary ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${primary ? AP.line2 : AP.line}`,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {children}
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          style={{
+            fontSize: 12,
+            color: AP.ink3,
+            lineHeight: 1,
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        >
+          ×
+        </button>
+      )}
+    </span>
+  );
+}
+
+function GroupHeader({ label, score, count, collapsed, onToggle }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+        <Chip reason={label} score={score} variant="pill" />
+        <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3 }}>
+          {count} image{count === 1 ? '' : 's'}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          background: 'transparent',
+          border: 'none',
+          fontFamily: AP.sans,
+          fontSize: 12.5,
+          color: AP.ink3,
+          padding: '2px 4px',
+        }}
+      >
+        {collapsed ? 'expand' : 'collapse'}
+        <span style={{ fontSize: 10 }}>{collapsed ? '▾' : '▴'}</span>
+      </button>
+    </div>
+  );
+}
+
 function ImageQueryView() {
-  const [query, setQuery]           = useState('');
-  const [results, setResults]       = useState([]);
-  const [total, setTotal]           = useState(0);      // total matched (approx)
-  const [page, setPage]             = useState(0);
-  const [loading, setLoading]       = useState(false);
-  const [error, setError]           = useState('');
-  const [mode, setMode]             = useState('keyword');
-  const [threshold, setThreshold]   = useState(0.0);
-  const [workspaceId, setWsId]      = useState('');
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [mode, setMode] = useState('keyword');
+  const [threshold, setThreshold] = useState(0.0);
+  const [workspaceId, setWsId] = useState(searchParams.get('workspace_id') ?? '');
   const [workspaces, setWorkspaces] = useState([]);
+  const [wsMenuOpen, setWsMenuOpen] = useState(false);
+  const [grouped, setGrouped] = useState(false);
+  const [collapsed, setCollapsed] = useState({});
+  const [focused, setFocused] = useState(false);
   const inputRef = useRef(null);
 
-  /* Load workspaces once */
   useEffect(() => {
-    axios.get(`${API}/workspaces`).then(r => setWorkspaces(r.data)).catch(() => {});
+    axios.get(`${API}/workspaces`).then((r) => setWorkspaces(r.data)).catch(() => {});
     inputRef.current?.focus();
   }, []);
 
-  /* Core fetch — called by search form submit AND pagination */
-  const fetchPage = useCallback(async (targetPage, opts = {}) => {
-    const q         = opts.query         ?? query;
-    const m         = opts.mode          ?? mode;
-    const thr       = opts.threshold     ?? threshold;
-    const ws        = opts.workspaceId   ?? workspaceId;
+  // ⌘K / Ctrl+K focuses the query field
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
-    setLoading(true);
-    setError('');
-    try {
-      const params = new URLSearchParams({
-        query:    q.trim(),
-        mode:     m,
-        top_k:    PAGE_SIZE,
-        skip:     targetPage * PAGE_SIZE,
-        threshold: thr,
-        ...(ws ? { workspace_id: ws } : {}),
-      });
-      const res = await axios.get(`${API}/search?${params}`);
-      const data = res.data;
-      setResults(data);
-      // If we got a full page, assume there's more; otherwise we know we're at the end
-      setTotal(prev =>
-        data.length < PAGE_SIZE
-          ? targetPage * PAGE_SIZE + data.length   // exact total known
-          : Math.max(prev, (targetPage + 1) * PAGE_SIZE + 1) // at least one more page
-      );
-      setPage(targetPage);
-    } catch {
-      setError('Search failed. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  }, [query, mode, threshold, workspaceId]);
+  const fetchPage = useCallback(
+    async (targetPage, opts = {}) => {
+      const q = opts.query ?? query;
+      const m = opts.mode ?? mode;
+      const thr = opts.threshold ?? threshold;
+      const ws = opts.workspaceId ?? workspaceId;
 
-  /* Auto-load all images on mount */
+      setLoading(true);
+      setError('');
+      try {
+        const params = new URLSearchParams({
+          query: q.trim(),
+          mode: m,
+          top_k: PAGE_SIZE,
+          skip: targetPage * PAGE_SIZE,
+          threshold: thr,
+          ...(ws ? { workspace_id: ws } : {}),
+        });
+        const res = await axios.get(`${API}/search?${params}`);
+        setResults(res.data);
+        setPage(targetPage);
+      } catch {
+        setError('Search failed. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [query, mode, threshold, workspaceId]
+  );
+
   useEffect(() => {
     fetchPage(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,298 +211,444 @@ function ImageQueryView() {
 
   const handleSearch = (e) => {
     e?.preventDefault();
-    setTotal(0);
     fetchPage(0);
   };
 
-  /* Re-fetch immediately when workspace or mode filter changes */
   const handleWsChange = (val) => {
     setWsId(val);
-    setTotal(0);
-    setPage(0);
+    setWsMenuOpen(false);
     fetchPage(0, { workspaceId: val });
   };
 
   const handleModeChange = (val) => {
     setMode(val);
-    setTotal(0);
-    setPage(0);
     fetchPage(0, { mode: val });
   };
 
+  // Group results by their match-reason label (client-side; the backend does not
+  // provide semantic reason clusters yet).
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (const img of results) {
+      const r = reasonFor(img);
+      const label = r?.label ?? 'no match info';
+      if (!map.has(label)) map.set(label, { label, score: r?.score ?? null, items: [] });
+      const g = map.get(label);
+      g.items.push(img);
+      if (r?.score != null) g.score = Math.max(g.score ?? 0, r.score);
+    }
+    return [...map.values()].sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+  }, [results]);
+
   const hasPrev = page > 0;
   const hasNext = results.length === PAGE_SIZE;
-
   const semanticActive = mode === 'semantic' || mode === 'hybrid';
+  const activeWs = workspaces.find((w) => w._id === workspaceId);
+  const openImage = (id) => navigate(`/image/${id}`);
+
+  const grid = (items) => (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 13 }}>
+      {items.map((img) => (
+        <ResultCell key={img._id} img={img} onOpen={() => openImage(img._id)} />
+      ))}
+    </div>
+  );
 
   return (
-    <div className="flex flex-col gap-6 pb-10">
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', color: AP.ink, overflow: 'hidden' }}>
+      {/* ── Top app bar: query (⌘K, active glow) · search ── */}
+      <form
+        onSubmit={handleSearch}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 16,
+          padding: '16px 20px',
+          borderBottom: `1px solid ${AP.line}`,
+          background: AP.panel,
+          flex: '0 0 auto',
+        }}
+      >
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 13px',
+            borderRadius: 12,
+            background: AP.card,
+            border: `1px solid ${focused ? AP.lumenLine : AP.line2}`,
+            boxShadow: focused ? `0 0 0 3px ${AP.lumenBg}, 0 0 26px rgba(124,108,247,.22)` : 'none',
+            transition: 'all .16s',
+          }}
+        >
+          <MagIcon size={17} c={focused ? AP.lumenSoft : AP.ink3} />
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            placeholder="Search your library — describe a scene, object, or filename…"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 15,
+              fontFamily: AP.sans,
+              color: AP.ink,
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+            }}
+          />
+          <Kbd>⌘K</Kbd>
+        </div>
+        <LumenBtn type="submit" disabled={loading}>
+          {loading ? 'Searching…' : 'Search'}
+        </LumenBtn>
+      </form>
 
-      {/* Header */}
-      <div>
-        <h2 className="text-xl font-bold text-slate-100">Search Images</h2>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Browse your library or search by keyword, semantic meaning, or a combination of both
-        </p>
-      </div>
+      {/* ── Body: left rail + results ── */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        {/* left rail */}
+        <div
+          className="ap-scroll"
+          style={{
+            width: 234,
+            flex: '0 0 auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 22,
+            padding: '20px 18px',
+            borderRight: `1px solid ${AP.line}`,
+            overflowY: 'auto',
+          }}
+        >
+          {/* workspace selector (Ember) */}
+          <div style={{ position: 'relative' }}>
+            <Eyebrow style={{ display: 'block', marginBottom: 9 }}>Workspace</Eyebrow>
+            <button
+              type="button"
+              onClick={() => setWsMenuOpen((v) => !v)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                padding: '11px 12px',
+                borderRadius: 11,
+                cursor: 'pointer',
+                background: AP.card,
+                border: `1px solid ${AP.line2}`,
+              }}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                <Dot c={AP.ember} size={8} glow />
+                <span
+                  style={{
+                    fontFamily: AP.sans,
+                    fontSize: 14,
+                    fontWeight: 600,
+                    color: AP.ink,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                >
+                  {activeWs?.name ?? 'All workspaces'}
+                </span>
+              </span>
+              <span style={{ fontSize: 11, color: AP.ink3 }}>▾</span>
+            </button>
+            {wsMenuOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  marginTop: 6,
+                  background: AP.card,
+                  border: `1px solid ${AP.line2}`,
+                  borderRadius: 11,
+                  padding: 6,
+                  zIndex: 30,
+                  boxShadow: '0 12px 30px rgba(0,0,0,.5)',
+                  maxHeight: 260,
+                  overflowY: 'auto',
+                }}
+              >
+                {[{ _id: '', name: 'All workspaces' }, ...workspaces].map((ws) => (
+                  <button
+                    key={ws._id || 'all'}
+                    type="button"
+                    onClick={() => handleWsChange(ws._id)}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontFamily: AP.sans,
+                      fontSize: 13,
+                      fontWeight: ws._id === workspaceId ? 600 : 500,
+                      color: ws._id === workspaceId ? AP.ink : AP.ink2,
+                      background: ws._id === workspaceId ? 'rgba(255,255,255,0.06)' : 'transparent',
+                      border: 'none',
+                    }}
+                  >
+                    <Dot c={ws._id === workspaceId ? AP.ember : AP.ink4} size={6} />
+                    {ws.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-      {/* ── Search + Filters ─────────────────────────────────────── */}
-      <form onSubmit={handleSearch} className="flex flex-col gap-4">
+          {/* filters */}
+          <div>
+            <Eyebrow style={{ display: 'block', marginBottom: 11 }}>Search mode</Eyebrow>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {MODES.map((m) => {
+                const on = mode === m.value;
+                return (
+                  <button
+                    key={m.value}
+                    type="button"
+                    title={m.desc}
+                    onClick={() => handleModeChange(m.value)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 11px',
+                      borderRadius: 9,
+                      cursor: 'pointer',
+                      fontFamily: AP.sans,
+                      fontSize: 13,
+                      fontWeight: on ? 600 : 500,
+                      color: on ? AP.lumenSoft : AP.ink2,
+                      background: on ? AP.lumenBg : 'rgba(255,255,255,0.02)',
+                      border: `1px solid ${on ? AP.lumenLine : AP.line}`,
+                      transition: 'all .14s',
+                    }}
+                  >
+                    {m.label}
+                    {on && <span style={{ fontSize: 11, color: AP.lumen }}>✦</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-        {/* Row 1 — search input + button */}
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
-            <div className="pointer-events-none absolute inset-y-0 left-3.5 flex items-center">
-              <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
+          {/* similarity threshold */}
+          <div style={{ opacity: semanticActive ? 1 : 0.4, pointerEvents: semanticActive ? 'auto' : 'none' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
+              <Eyebrow>Min similarity</Eyebrow>
+              <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.lumenSoft }}>
+                {(threshold * 100).toFixed(0)}%
+              </span>
             </div>
             <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Type to search, or leave blank to browse all images…"
-              className="w-full bg-slate-900/70 border border-slate-700/60
-                         focus:border-violet-500/70 focus:shadow-[0_0_0_3px_rgba(139,92,246,0.12)]
-                         rounded-xl pl-9 pr-4 py-2.5 text-sm text-slate-100
-                         placeholder-slate-500 outline-none transition-all backdrop-blur"
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={threshold}
+              onChange={(e) => setThreshold(parseFloat(e.target.value))}
+              onMouseUp={() => fetchPage(0)}
+              style={{ width: '100%', accentColor: AP.lumen, cursor: 'pointer' }}
             />
           </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="shrink-0 h-[42px] px-5 bg-gradient-to-r from-violet-600 to-blue-600
-                       hover:from-violet-500 hover:to-blue-500 text-white text-sm font-semibold
-                       rounded-xl disabled:opacity-50 transition-all
-                       shadow-[0_0_16px_rgba(139,92,246,0.25)] flex items-center gap-2"
-          >
-            {loading ? (
-              <>
-                <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Searching
-              </>
-            ) : (
-              <>
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                Search
-              </>
-            )}
-          </button>
-        </div>
 
-        {/* Row 2 — always-visible filters */}
-        <div className="bg-slate-900/50 border border-slate-800/70 rounded-2xl p-4
-                        backdrop-blur flex flex-col gap-4">
-
-          {/* Mode tabs */}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Search Mode</span>
-            <div className="flex gap-2">
-              {MODES.map(m => (
-                <button
-                  key={m.value}
-                  type="button"
-                  title={m.desc}
-                  onClick={() => handleModeChange(m.value)}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                    mode === m.value
-                      ? 'bg-violet-600/20 border-violet-500/50 text-violet-300'
-                      : 'bg-slate-800/40 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:border-slate-600'
-                  }`}
+          {/* applied facets */}
+          <div>
+            <Eyebrow style={{ display: 'block', marginBottom: 10 }}>Applied</Eyebrow>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+              <FacetPill primary>{mode}</FacetPill>
+              {activeWs && <FacetPill onRemove={() => handleWsChange('')}>{activeWs.name}</FacetPill>}
+              {semanticActive && threshold > 0 && (
+                <FacetPill
+                  onRemove={() => {
+                    setThreshold(0);
+                    fetchPage(0, { threshold: 0 });
+                  }}
                 >
-                  {m.label}
-                </button>
-              ))}
+                  ≥{(threshold * 100).toFixed(0)}%
+                </FacetPill>
+              )}
             </div>
           </div>
 
-          {/* Second row: Workspace | Threshold */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div
+            style={{
+              marginTop: 'auto',
+              display: 'flex',
+              gap: 7,
+              alignItems: 'flex-start',
+              paddingTop: 14,
+              color: AP.ink3,
+            }}
+          >
+            <span style={{ color: AP.lumen, fontSize: 12 }}>✦</span>
+            <span style={{ fontFamily: AP.sans, fontSize: 12, lineHeight: 1.4 }}>
+              Facets scope the same query — they don't re-search.
+            </span>
+          </div>
+        </div>
 
-            {/* Workspace filter */}
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Workspace</span>
-              <select
-                value={workspaceId}
-                onChange={e => handleWsChange(e.target.value)}
-                className="bg-slate-800/60 border border-slate-700/60 focus:border-violet-500/60
-                           rounded-xl px-3 py-2 text-sm text-slate-200 outline-none
-                           transition-all w-full"
-              >
-                <option value="">All Workspaces</option>
-                {workspaces.map(ws => (
-                  <option key={ws._id} value={ws._id}>{ws.name}</option>
-                ))}
-              </select>
+        {/* results */}
+        <div
+          className="ap-scroll"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            padding: 20,
+            overflowY: 'auto',
+          }}
+        >
+          {/* results header */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
+              <span style={{ fontSize: 15, fontWeight: 600, color: AP.ink }}>
+                {results.length}
+                {hasNext ? '+' : ''}
+              </span>
+              <span style={{ fontFamily: AP.mono, fontSize: 11.5, color: AP.ink3 }}>
+                results{grouped ? ` · ${groups.length} groups` : ''} · page {page + 1}
+              </span>
             </div>
-
-            {/* Similarity threshold — only relevant for semantic/hybrid */}
-            <div className={`flex flex-col gap-1.5 ${!semanticActive ? 'opacity-40 pointer-events-none' : ''}`}>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                  Min Similarity {!semanticActive && <span className="normal-case">(semantic only)</span>}
-                </span>
-                <span className="text-xs font-bold text-violet-400 tabular-nums">
-                  {(threshold * 100).toFixed(0)}%
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0} max={1} step={0.01}
-                value={threshold}
-                onChange={e => setThreshold(parseFloat(e.target.value))}
-                className="w-full h-1.5 accent-violet-500 cursor-pointer mt-1"
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+              <SelectControl label="Sort" value="match" title="Results are ranked by match score" />
+              <SelectControl
+                label="Group"
+                value="reason"
+                accent
+                active={grouped}
+                onClick={() => setGrouped((g) => !g)}
               />
             </div>
           </div>
-        </div>
-      </form>
 
-      {/* ── Error ───────────────────────────────────────────────── */}
-      {error && (
-        <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3
-                        text-sm text-red-400 flex items-center justify-between gap-3">
-          <span>{error}</span>
-          <button onClick={() => setError('')} className="text-red-700 hover:text-red-500 shrink-0">✕</button>
-        </div>
-      )}
-
-      {/* ── Results header ──────────────────────────────────────── */}
-      {!loading && (results.length > 0 || page > 0) && (
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-slate-500">
-            {query ? (
-              <>
-                Showing{' '}
-                <span className="text-slate-300 font-semibold">{page * PAGE_SIZE + 1}–{page * PAGE_SIZE + results.length}</span>
-                {' '}for{' '}
-                <span className="text-slate-300 font-semibold">"{query}"</span>
-                <span className="mx-1.5 text-slate-700">·</span>
-                <span className="text-slate-600">{mode}</span>
-              </>
-            ) : (
-              <>
-                <span className="text-slate-300 font-semibold">{page * PAGE_SIZE + 1}–{page * PAGE_SIZE + results.length}</span>
-                {' '}of your images
-                {workspaceId && workspaces.find(w => w._id === workspaceId) && (
-                  <> in <span className="text-violet-400 font-semibold">
-                    {workspaces.find(w => w._id === workspaceId).name}
-                  </span></>
-                )}
-              </>
-            )}
-          </p>
-          {/* Pagination controls — top */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => fetchPage(page - 1)}
-              disabled={!hasPrev || loading}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold
-                         border border-slate-700 text-slate-400 hover:text-slate-200
-                         hover:border-slate-600 disabled:opacity-30 disabled:cursor-not-allowed
-                         transition-all"
+          {error && (
+            <div
+              style={{
+                padding: '12px 15px',
+                borderRadius: 11,
+                background: 'rgba(240,86,107,.1)',
+                border: '1px solid rgba(240,86,107,.35)',
+                fontFamily: AP.sans,
+                fontSize: 13,
+                color: '#f0566b',
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 10,
+              }}
             >
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              Prev
-            </button>
-            <span className="text-xs text-slate-600 tabular-nums px-1">p.{page + 1}</span>
-            <button
-              onClick={() => fetchPage(page + 1)}
-              disabled={!hasNext || loading}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold
-                         border border-slate-700 text-slate-400 hover:text-slate-200
-                         hover:border-slate-600 disabled:opacity-30 disabled:cursor-not-allowed
-                         transition-all"
-            >
-              Next
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      )}
+              {error}
+              <button
+                type="button"
+                onClick={() => setError('')}
+                style={{ background: 'transparent', border: 'none', color: '#f0566b', cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
-      {/* ── Grid ────────────────────────────────────────────────── */}
-      {loading ? (
-        <div className="flex items-center justify-center py-24">
-          <div className="w-8 h-8 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
-        </div>
-      ) : results.length > 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-          {results.map(img => <ImageCard key={img._id} img={img} />)}
-        </div>
-      ) : !error ? (
-        /* Empty state */
-        <div className="flex flex-col items-center gap-4 py-24 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-violet-900/60 to-blue-900/60
-                          border border-violet-800/40 flex items-center justify-center
-                          shadow-[0_0_30px_rgba(139,92,246,0.1)]">
-            <svg className="w-8 h-8 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14
-                       m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </div>
-          <div>
-            {query ? (
-              <>
-                <p className="text-sm font-semibold text-slate-300">
-                  No results for <span className="text-slate-100">"{query}"</span>
-                </p>
-                <p className="text-xs text-slate-600 mt-1">Try a different query or switch to Hybrid mode</p>
-              </>
+          {loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '90px 0' }}>
+              <span
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 99,
+                  border: `2px solid ${AP.lumenBg2}`,
+                  borderTopColor: AP.lumen,
+                  animation: 'spin 0.8s linear infinite',
+                }}
+              />
+              <style>{'@keyframes spin{to{transform:rotate(360deg)}}'}</style>
+            </div>
+          ) : results.length > 0 ? (
+            grouped ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                {groups.map((g, gi) => {
+                  const isCol = !!collapsed[gi];
+                  return (
+                    <div key={g.label} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <GroupHeader
+                        label={g.label}
+                        score={g.score}
+                        count={g.items.length}
+                        collapsed={isCol}
+                        onToggle={() => setCollapsed((c) => ({ ...c, [gi]: !c[gi] }))}
+                      />
+                      {!isCol && grid(g.items)}
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
-              <>
-                <p className="text-sm font-semibold text-slate-300">No images found</p>
-                <p className="text-xs text-slate-600 mt-1">
-                  Add images to a workspace and wait for them to be processed
+              grid(results)
+            )
+          ) : !error ? (
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 12,
+                padding: '90px 0',
+                textAlign: 'center',
+              }}
+            >
+              <MagIcon size={30} c={AP.ink4} />
+              <div>
+                <p style={{ margin: 0, fontFamily: AP.sans, fontSize: 14, fontWeight: 600, color: AP.ink2 }}>
+                  {query ? `No results for “${query}”` : 'No images found'}
                 </p>
-              </>
-            )}
-          </div>
-        </div>
-      ) : null}
+                <p style={{ margin: '5px 0 0', fontFamily: AP.sans, fontSize: 12, color: AP.ink3 }}>
+                  {query
+                    ? 'Try a different query or switch to Hybrid mode'
+                    : 'Add images to a workspace and wait for them to be processed'}
+                </p>
+              </div>
+            </div>
+          ) : null}
 
-      {/* ── Pagination — bottom ──────────────────────────────────── */}
-      {!loading && results.length > 0 && (hasPrev || hasNext) && (
-        <div className="flex items-center justify-center gap-3 pt-4">
-          <button
-            onClick={() => fetchPage(page - 1)}
-            disabled={!hasPrev}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold
-                       border border-slate-700 text-slate-400 hover:text-slate-200
-                       hover:border-slate-600 disabled:opacity-30 disabled:cursor-not-allowed
-                       transition-all"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Previous
-          </button>
-          <span className="text-sm text-slate-500 tabular-nums">Page {page + 1}</span>
-          <button
-            onClick={() => fetchPage(page + 1)}
-            disabled={!hasNext}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold
-                       border border-slate-700 text-slate-400 hover:text-slate-200
-                       hover:border-slate-600 disabled:opacity-30 disabled:cursor-not-allowed
-                       transition-all"
-          >
-            Next
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
+          {/* pagination */}
+          {!loading && results.length > 0 && (hasPrev || hasNext) && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, paddingTop: 8 }}>
+              <GhostBtn onClick={() => fetchPage(page - 1)} disabled={!hasPrev}>
+                ‹ Previous
+              </GhostBtn>
+              <span style={{ fontFamily: AP.mono, fontSize: 12, color: AP.ink3 }}>page {page + 1}</span>
+              <GhostBtn onClick={() => fetchPage(page + 1)} disabled={!hasNext}>
+                Next ›
+              </GhostBtn>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
