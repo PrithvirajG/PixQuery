@@ -105,15 +105,27 @@ class SearchService:
             skip=0,
         )
         captions = self._captions_map()
+        ocr_texts = self._ocr_map()
 
         matched: list[dict[str, Any]] = []
         for asset in pool:
             caption = captions.get(asset["_id"], "")
-            haystack = f"{asset.get('current_path', '')} {caption}".lower()
-            if lowered in haystack:
-                matched.append(
-                    {**serialize_document(asset), "description": caption, "score": 1.0}
-                )
+            ocr_text = ocr_texts.get(asset["_id"], "")
+            path = asset.get("current_path", "")
+            fields = []
+            if lowered in path.lower():
+                fields.append("filename")
+            if lowered in caption.lower():
+                fields.append("caption")
+            if ocr_text and lowered in ocr_text.lower():
+                fields.append("ocr")
+            if fields:
+                matched.append({
+                    **serialize_document(asset),
+                    "description": caption,
+                    "score": 1.0,
+                    "match_reason": {"mode": "keyword", "terms": [query], "fields": fields},
+                })
 
         return matched[skip: skip + top_k]
 
@@ -165,10 +177,12 @@ class SearchService:
             asset = self.repository.get_asset(asset_id)
             if not asset or not asset.get("active"):
                 continue
+            certainty = hit.get("certainty", 0.0)
             results.append({
                 **serialize_document(asset),
                 "description": captions.get(asset_id, ""),
-                "score": hit.get("certainty", 0.0),
+                "score": certainty,
+                "match_reason": {"mode": "semantic", "similarity": round(certainty, 3)},
             })
             if len(results) >= top_k:
                 break
@@ -197,13 +211,20 @@ class SearchService:
             top_k=top_k * 2, skip=0,
             threshold=threshold, workspace_id=workspace_id,
         )
-        seen: set[str] = set()
-        merged: list[dict[str, Any]] = []
-        for r in kw + sem:
-            if r["_id"] not in seen:
-                seen.add(r["_id"])
-                merged.append(r)
-        merged.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+        # Index each signal's contribution so the fused result can explain itself.
+        # (Semantic may have fallen back to keyword, so only trust true semantic hits.)
+        kw_reason = {r["_id"]: r["match_reason"] for r in kw}
+        sem_sim = {
+            r["_id"]: r["match_reason"]["similarity"]
+            for r in sem
+            if r.get("match_reason", {}).get("mode") == "semantic"
+        }
+
+        merged = _reciprocal_rank_fusion([kw, sem])
+        for result in merged:
+            result["match_reason"] = _combine_match_reasons(
+                kw_reason.get(result["_id"]), sem_sim.get(result["_id"])
+            )
         return merged[skip: skip + top_k]
 
     # ──────────────────────────────────────────────────────────────
@@ -267,25 +288,84 @@ class SearchService:
         return None
 
     def _captions_map(self) -> dict[str, str]:
-        outputs = self.repository.model_outputs.find({"output_type": "caption"})
+        return self._text_output_map("caption")
+
+    def _ocr_map(self) -> dict[str, str]:
+        return self._text_output_map("ocr")
+
+    def _text_output_map(self, output_type: str) -> dict[str, str]:
+        outputs = self.repository.model_outputs.find({"output_type": output_type})
         return {
             output["asset_id"]: output.get("payload", {}).get("text", "")
             for output in outputs
         }
 
     def _encode_query(self, query: str) -> list[float] | None:
-        """Encode text query to CLIP vector. Returns None if CLIP unavailable."""
+        """Encode a text query to a CLIP vector. Returns None if CLIP unavailable.
+
+        Uses the same shared ``ClipModel`` (clip ViT-B/32) that the worker uses to
+        embed images, so the query and the stored image/caption embeddings live in
+        one vector space. The model is cached, so it loads once — not per request.
+        """
         try:
-            from transformers import CLIPProcessor, CLIPModel
-            import torch
-            model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            inputs = processor(text=[query], return_tensors="pt", padding=True)
-            with torch.no_grad():
-                text_features = model.get_text_features(**inputs)
-            return text_features[0].tolist()
+            from src.pipelines.processing.models.clip import get_clip_model
+
+            vector = get_clip_model().embed_text(query)
+            if vector is None:
+                return None
+            return [float(v) for v in vector]
         except Exception:
             return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hybrid ranking — Reciprocal Rank Fusion
+
+def _reciprocal_rank_fusion(
+    result_lists: list[list[dict[str, Any]]],
+    *,
+    k: int = 60,
+) -> list[dict[str, Any]]:
+    """Fuse several ranked result lists into one ordering via RRF.
+
+    RRF score for a document is the sum over each list it appears in of
+    ``1 / (k + rank)``. It needs no score normalization, so it combines the
+    keyword list (all scored 1.0) and the semantic list (certainty 0–1) robustly
+    instead of letting the fixed keyword score dominate.
+
+    The representative dict kept per document preserves a meaningful ``score`` for
+    display: the keyword entry (exact match, 1.0) is preferred when present since
+    earlier lists are visited first, otherwise the semantic certainty is used.
+    """
+    fused: dict[str, float] = {}
+    representative: dict[str, dict[str, Any]] = {}
+    for results in result_lists:
+        for rank, item in enumerate(results):
+            doc_id = item["_id"]
+            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+            if doc_id not in representative:
+                representative[doc_id] = item
+            elif not representative[doc_id].get("description") and item.get("description"):
+                representative[doc_id] = item
+    ordered_ids = sorted(fused, key=lambda doc_id: fused[doc_id], reverse=True)
+    return [representative[doc_id] for doc_id in ordered_ids]
+
+
+def _combine_match_reasons(
+    keyword_reason: dict[str, Any] | None,
+    similarity: float | None,
+) -> dict[str, Any]:
+    """Merge a doc's keyword and semantic contributions into one explanation."""
+    if keyword_reason and similarity is not None:
+        return {
+            "mode": "hybrid",
+            "terms": keyword_reason.get("terms", []),
+            "fields": keyword_reason.get("fields", []),
+            "similarity": similarity,
+        }
+    if keyword_reason:
+        return keyword_reason
+    return {"mode": "semantic", "similarity": similarity or 0.0}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

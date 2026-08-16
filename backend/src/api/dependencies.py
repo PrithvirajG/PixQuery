@@ -22,6 +22,7 @@ def get_job_service() -> JobService:
     return JobService(get_pipeline_repository(), publisher_factory=RabbitPublisher)
 
 
+@lru_cache
 def get_search_service() -> SearchService:
     return SearchService(get_pipeline_repository())
 

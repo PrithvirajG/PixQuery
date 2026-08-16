@@ -20,4 +20,4 @@ async def list_recent_jobs(
     stats_service: StatsService = Depends(get_stats_service),
     current_user: dict = Depends(get_current_user),
 ):
-    return stats_service.list_recent_jobs(limit=limit)
+    return stats_service.list_recent_jobs(user_id=current_user["_id"], limit=limit)
