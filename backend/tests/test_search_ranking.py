@@ -1,5 +1,6 @@
 """Tests for hybrid ranking (RRF) and semantic search fallback."""
 import unittest
+from unittest import mock
 
 from src.repositories import InMemoryPipelineRepository
 from src.services.search_service import SearchService, _reciprocal_rank_fusion
@@ -64,8 +65,29 @@ class SemanticFallbackTests(unittest.TestCase):
         )
 
     def test_encode_query_returns_none_without_clip(self):
-        # No torch/clip in this environment → graceful None, not an exception.
-        self.assertIsNone(self.search._encode_query("cat"))
+        # Simulate CLIP genuinely being unavailable (e.g. missing torch/clip
+        # dependency, or model load failure) rather than relying on it being
+        # absent from the test environment -- in this environment CLIP is
+        # installed and loads successfully, so encode_query would otherwise
+        # return a real embedding and this test would be asserting a fact
+        # about the environment, not about the fallback behavior.
+        with mock.patch(
+            "src.pipelines.processing.models.clip.get_clip_model",
+            side_effect=ImportError("CLIP is unavailable"),
+        ):
+            self.assertIsNone(self.search._encode_query("cat"))
+
+    def test_encode_query_returns_none_when_embed_text_fails(self):
+        # embed_text() itself returns None on internal failure (see
+        # ClipModel.embed_text's except branch) -- _encode_query must
+        # propagate that as None too, not raise.
+        fake_model = mock.Mock()
+        fake_model.embed_text.return_value = None
+        with mock.patch(
+            "src.pipelines.processing.models.clip.get_clip_model",
+            return_value=fake_model,
+        ):
+            self.assertIsNone(self.search._encode_query("cat"))
 
     def test_semantic_falls_back_to_keyword(self):
         results = self.search.search(query="tabby", mode="semantic")
