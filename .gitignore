@@ -10,3 +10,7 @@ qdrant_data
 .claude/settings.local.json
 obsidian/.obsidian/
 obsidian/PixQuery/.obsidian/plugins/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/
