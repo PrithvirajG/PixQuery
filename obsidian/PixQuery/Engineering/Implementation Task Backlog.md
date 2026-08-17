@@ -4,6 +4,15 @@ type: knowledge-note
 created: 2026-05-29
 ---
 
+> **Update 2026-08-16: Superseded — see PR #1.** All of P0–P4 below are now done in the codebase (this doc's checkboxes/status were never updated to reflect it):
+> - **P0** — `AGENTS.md`, `README.md`, and `CLAUDE.md` now correctly describe MongoDB/RabbitMQ/Weaviate, the real `backend/src` layout, and the actual frontend filenames.
+> - **P1 (central task)** — the dynamic pipeline executor exists: `backend/src/pipelines/processing/executors/base.py` (`NodeExecutor` Protocol), `registry.py` (`_EXECUTOR_CLASSES`), and `pipeline.py`'s `DynamicPipeline` (Kahn's-algorithm topological execution over the node DAG, per-node output persistence). The worker (`rmq_processor.py`) runs `DynamicPipeline`, and the ingestion linkage now reads workspace `pipeline_ids`.
+> - **P2** — `SearchService._encode_query()` now uses the shared, cached `ClipModel` (`get_clip_model()`) instead of loading HuggingFace transformers per request, fixing both the perf issue and the image/text embedding-space mismatch; hybrid ranking uses Reciprocal Rank Fusion (`_reciprocal_rank_fusion()` in `search_service.py`).
+> - **P3** — search results and image detail carry a structured `match_reason` (`search_service.py`), giving explainable "why matched" provenance.
+> - **P4** — an OCR node (`OcrExecutor` in `executors/builtin.py`, `node_type: "ocr"`) and metadata/EXIF extraction are implemented and registered in `_EXECUTOR_CLASSES`.
+>
+> Current source of truth: `CLAUDE.md`'s DynamicPipeline section and this repo's code. Kept below as a historical decision record — do not treat the P0–P4 task lists as an open backlog.
+
 # PixQuery — Implementation Task Backlog (P0–P4)
 
 Derived from [[Product Vision & Roadmap]], [[Current Implementation Audit]], [[Architecture Reality Map]], and [[Market & Technical Landscape Analysis]]. Turns those notes into precise, prioritized engineering tasks, verified against the current codebase.

@@ -4,6 +4,8 @@ type: knowledge-note
 source: /mnt/d/Projects/PixQuery/docs/engineering/pixquery-architecture-reality-map.md
 ---
 
+> **Update 2026-08-16: Superseded — see PR #1.** §2 "Model processing" / "Pipeline promise vs execution reality" (§3) and §4's "Proposed dynamic pipeline executor MVP" have since been implemented essentially as specified: `backend/src/pipelines/processing/executors/base.py` defines the `NodeExecutor` Protocol (and `BaseNodeExecutor`) exactly as sketched, and `registry.py`'s `_EXECUTOR_CLASSES` is the realized node-type registry, with `DynamicPipeline` (`pipeline.py`) executing the DAG in Kahn's-algorithm topological order instead of the old fixed YOLO→BLIP→CLIP path. The §3 "Vector DB mismatch" (Qdrant vs Weaviate) contradiction is also resolved — the codebase and docs consistently use Weaviate. Current source of truth: `CLAUDE.md`'s DynamicPipeline section and this repo's code. Kept below as a historical decision record.
+
 # PixQuery — Architecture Reality Map
 
 **Date:** 2026-05-29  

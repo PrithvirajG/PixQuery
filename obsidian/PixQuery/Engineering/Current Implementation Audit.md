@@ -4,6 +4,8 @@ type: knowledge-note
 source: /mnt/d/Projects/PixQuery/docs/engineering/pixquery-current-implementation-audit.md
 ---
 
+> **Update 2026-08-16: Superseded — see PR #1.** This audit's central finding — "the worker still runs a fixed default image analysis pipeline" and `pipeline_definitions`/`pipeline_nodes` are "never read during processing" (§5, §9) — is no longer true. `DynamicPipeline` (`backend/src/pipelines/processing/pipeline.py`) now loads each job's assigned pipeline definition and executes it as a real DAG: `_topological_order()` runs Kahn's algorithm over the node graph, and `registry.py`'s `_EXECUTOR_CLASSES` maps `node_type` → executor (object_detection, captioning, embedding, resize, grayscale, image_write, ocr, face_detection, classification). `rmq_processor.py`'s `ImageProcessorConsumer` now instantiates `DynamicPipeline`, not the old hardcoded default. §8 "Documentation drift" (AGENTS.md referencing Redis/Qdrant, wrong entrypoint) has also been fixed — AGENTS.md/README.md/CLAUDE.md now correctly describe MongoDB/RabbitMQ/Weaviate and `api_main.py`. Current source of truth: `CLAUDE.md`'s DynamicPipeline section and this repo's code. Kept below as a historical decision record — do not treat §5/§8/§9 as current.
+
 # PixQuery — Current Implementation Audit
 
 **Date:** 2026-05-29  
