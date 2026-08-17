@@ -26,6 +26,8 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="test-root",
+            pipeline_id="test-pipeline",
+            pipeline_version="v1",
             stable_interval_seconds=0.01,
             stable_timeout_seconds=1,
         )
@@ -114,6 +116,7 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="test-root",
+            pipeline_id="test-pipeline",
             pipeline_version="v2",
             stable_interval_seconds=0.01,
             stable_timeout_seconds=1,
@@ -121,6 +124,25 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
         await next_reconciler.observe_file(image)
         self.assertEqual(len(self.repository.processing_jobs.docs), 2)
         self.assertEqual(self.repository.processing_jobs.docs[0]["_id"], job["_id"])
+
+    async def test_no_pipelines_assigned_ingests_files_without_creating_jobs(self):
+        image = self.root / "orphan.jpg"
+        image.write_bytes(b"no-pipeline")
+        reconciler = FilesystemReconciler(
+            repository=self.repository,
+            publisher=self.publisher,
+            workspace_path=str(self.root),
+            workspace_id="test-root",
+            stable_interval_seconds=0.01,
+            stable_timeout_seconds=1,
+        )
+
+        await reconciler.reconcile()
+
+        self.assertEqual(len(self.repository.image_assets.docs), 1)
+        self.assertEqual(len(self.repository.file_observations.docs), 1)
+        self.assertEqual(len(self.repository.processing_jobs.docs), 0)
+        self.assertEqual(self.publisher.messages, [])
 
 
 class ProcessingRetryTests(unittest.TestCase):

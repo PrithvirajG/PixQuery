@@ -2,6 +2,7 @@ import clip
 import torch
 from PIL import Image
 import numpy as np
+from functools import lru_cache
 from .interface import ModelInterface
 import logging
 
@@ -9,6 +10,17 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+
+@lru_cache(maxsize=1)
+def get_clip_model(model_name: str = 'ViT-B/32') -> 'ClipModel':
+    """Return a process-wide shared ClipModel, loading the weights only once.
+
+    Both image embedding (worker) and text-query embedding (search) must use the
+    same CLIP implementation so their vectors share one space; this is the single
+    entry point for that model.
+    """
+    return ClipModel(model_name)
 
 class ClipModel(ModelInterface):
     def __init__(self, model_name='ViT-B/32'):

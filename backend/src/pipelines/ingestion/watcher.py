@@ -93,6 +93,9 @@ class WorkspaceWatcher:
         self.loop = loop
         # workspace_id → (Observer, FilesystemReconciler)
         self._watchers: dict[str, tuple[Observer, FilesystemReconciler]] = {}
+        # workspace_id → definition signature, to detect edits (path/pipelines/
+        # extensions) that require rebuilding the reconciler.
+        self._signatures: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -100,13 +103,26 @@ class WorkspaceWatcher:
         """Read workspace_path, falling back to the legacy watch_root field."""
         return ws.get("workspace_path") or ws["watch_root"]
 
+    @classmethod
+    def _signature(cls, ws: dict) -> tuple:
+        return (
+            cls._get_path(ws),
+            tuple(ws.get("pipeline_ids") or []),
+            tuple(sorted(ws.get("extensions") or [])),
+        )
+
     def _make_reconciler(self, ws: dict) -> FilesystemReconciler:
         extensions = set(ws.get("extensions") or [".jpg", ".jpeg", ".png", ".webp"])
+        # Run each pipeline the workspace assigns. When none are attached the
+        # reconciler still ingests files (assets + observations) but creates no
+        # processing jobs — there is no implicit default pipeline.
+        pipeline_ids = ws.get("pipeline_ids") or []
         return FilesystemReconciler(
             repository=self.repository,
             publisher=self.publisher,
             workspace_path=self._get_path(ws),
             workspace_id=ws["_id"],
+            pipeline_ids=pipeline_ids,
             extensions=extensions,
         )
 
@@ -123,10 +139,17 @@ class WorkspaceWatcher:
         )
         observer.start()
         self._watchers[ws_id] = (observer, reconciler)
+        self._signatures[ws_id] = self._signature(ws)
         logger.info("Started watching workspace '%s' at %s", ws.get("name"), root)
+        if not reconciler.pipelines:
+            logger.info(
+                "Workspace '%s' has no pipelines attached — files will be ingested but not processed",
+                ws.get("name"),
+            )
 
     def _stop_one(self, ws_id: str) -> None:
         observer, _ = self._watchers.pop(ws_id)
+        self._signatures.pop(ws_id, None)
         observer.stop()
         observer.join()
         logger.info("Stopped watching workspace %s", ws_id)
@@ -142,6 +165,13 @@ class WorkspaceWatcher:
             if ws_id not in active_ids:
                 self._stop_one(ws_id)
 
+        # Restart workspaces whose definition changed (path, pipelines, extensions)
+        for ws in active_workspaces:
+            ws_id = ws["_id"]
+            if ws_id in self._watchers and self._signatures.get(ws_id) != self._signature(ws):
+                logger.info("Workspace '%s' definition changed — rebuilding watcher", ws.get("name"))
+                self._stop_one(ws_id)
+
         # Start newly added workspaces + run initial reconcile
         for ws in active_workspaces:
             if ws["_id"] not in self._watchers:
@@ -150,6 +180,13 @@ class WorkspaceWatcher:
 
     async def reconcile_workspace(self, workspace_id: str) -> int:
         """Run an immediate full reconcile for one workspace."""
+        # Re-read the definition so a scan issued right after an edit (e.g.
+        # attaching a pipeline) uses the current pipeline list, not a cached one.
+        ws = self.repository.get_workspace(workspace_id)
+        if ws and workspace_id in self._watchers and self._signatures.get(workspace_id) != self._signature(ws):
+            logger.info("Workspace '%s' definition changed — rebuilding watcher", ws.get("name"))
+            self._stop_one(workspace_id)
+            self._start_one(ws)
         if workspace_id not in self._watchers:
             logger.warning("reconcile requested for unknown workspace %s", workspace_id)
             return 0

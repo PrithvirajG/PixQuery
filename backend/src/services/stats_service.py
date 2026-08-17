@@ -12,6 +12,6 @@ class StatsService:
     def get_overview(self, *, owner_id: str) -> dict[str, Any]:
         return self.repository.get_stats_overview(owner_id=owner_id)
 
-    def list_recent_jobs(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        jobs = self.repository.list_recent_jobs(limit=limit)
+    def list_recent_jobs(self, *, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        jobs = self.repository.list_recent_jobs(user_id=user_id, limit=limit)
         return serialize_documents(jobs)

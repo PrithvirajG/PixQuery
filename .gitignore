@@ -7,3 +7,6 @@ __pycache__/
 *.py[cod]
 node_modules
 qdrant_data
+.claude/settings.local.json
+obsidian/.obsidian/
+obsidian/PixQuery/.obsidian/plugins/

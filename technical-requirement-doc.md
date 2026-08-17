@@ -13,7 +13,8 @@ PixQuery provides:
 - **Workspace management** — arbitrary watched directories, each independently configured with file-extension filters and one or more processing pipelines.
 - **Pipeline system** — composable, sequential chains of AI nodes (object detection, captioning, CLIP embedding, CV ops, etc.) replacing the previous hardcoded `DefaultImageAnalysisPipeline`.
 - **Multi-modal search** — keyword (caption/path substring), semantic (CLIP vector via Weaviate), and hybrid (merged + re-ranked) modes.
-- **Per-user data isolation** — all collections are scoped by `owner_id`.
+- **Shared workspaces with role-based access** — a workspace can be shared with other users (Viewer / Editor roles); the creator is the owner. Data visibility is scoped by **workspace membership**, not by a single `owner_id` (see §10.1).
+- **Per-workspace processing isolation** — the same image content in two different workspaces is processed and stored independently, so workspaces shared with different people stay fully separated (see §10.1).
 - **REST API + WebSocket** — FastAPI backend with JWT authentication.
 - **React SPA** — dark glassmorphic UI built with Tailwind CSS.
 
@@ -66,13 +67,16 @@ PixQuery provides:
 
 ## 3. MongoDB Schema
 
+> **Source of truth:** every collection is defined as a **Pydantic v2 model** in `backend/src/models/` (`documents.py`). The repository builds documents via `Model(...).to_doc()` instead of hand-assembled dicts, so the shapes below are typed and validated in code, not just prose. Models are tolerant on read (`extra="ignore"`) so documents written under an older schema still parse; the `schema_migrations` collection (see §10.2) tracks applied migrations.
+
 ### 3.1 Existing Collections
 
 **`image_assets`**
 ```
-_id (uuid), content_sha256 (unique), mime_type, size_bytes
+_id (uuid), content_sha256, workspace_id, mime_type, size_bytes
 first_seen_at, latest_seen_at, active (bool), current_path, owner_id, metadata
 ```
+> **Uniqueness is `(workspace_id, content_sha256)`** — assets are scoped per workspace, so identical bytes in two workspaces become two independent asset rows. (Prior schema enforced a single global-unique `content_sha256`; that index is dropped on startup — see §10.1.)
 
 **`file_observations`**
 ```
@@ -82,13 +86,14 @@ content_sha256, status (active|missing), first_seen_at, last_seen_at, missing_si
 
 **`processing_jobs`**
 ```
-_id (uuid), asset_id, pipeline_id, pipeline_version, status (queued|processing|completed|failed)
+_id (uuid), workspace_id, asset_id, pipeline_id, pipeline_version, status (queued|processing|completed|failed)
 attempt_count, next_attempt_at, last_error, created_at, updated_at
 ```
+> **Uniqueness is `(workspace_id, asset_id, pipeline_id, pipeline_version)`** — one job per asset per pipeline version per workspace. Because `asset_id` is already per-workspace, every job, run, and output downstream inherits workspace isolation automatically.
 
 **`pipeline_runs`** — one run record per job execution attempt
 
-**`model_outputs`** — output payload per model per run (detections, captions, embeddings)
+**`model_outputs`** — output payload per model per run (detections, captions, embeddings); tagged with `workspace_id`
 
 **`users`** — username + hashed_password
 
@@ -121,11 +126,15 @@ nodes: [
 ]
 ```
 
-**`workspace_definitions`** — watched folder + pipeline assignment
+**`workspace_definitions`** — watched folder + pipeline assignment + sharing
 ```
-_id (uuid), name, watch_root (abs path), watch_root_id (uuid), owner_id
+_id (uuid), name, workspace_path (abs path), owner_id
 active (bool), pipeline_ids [str], extensions [str], created_at
+members: [
+  { user_id: uuid, role: "viewer" | "editor", added_at: datetime }, ...
+]
 ```
+> `owner_id` is the creator (implicit `owner` role). `members` holds users the workspace is shared with. A user can access a workspace if they are the owner or appear in `members` — this is the basis of all data-visibility scoping (see §10.1).
 
 ---
 
@@ -192,9 +201,16 @@ The Pipeline Manager UI validates chain compatibility: if a node's required `con
 | GET | `/workspaces` | List user's workspaces |
 | POST | `/workspaces` | Create workspace |
 | GET | `/workspaces/{id}` | Get workspace |
-| PUT | `/workspaces/{id}` | Update workspace |
-| DELETE | `/workspaces/{id}` | Delete workspace |
-| POST | `/workspaces/{id}/scan` | Trigger immediate reconcile |
+| PUT | `/workspaces/{id}` | Update workspace (owner/editor) |
+| DELETE | `/workspaces/{id}` | Delete workspace + cascade its data (owner only) |
+| POST | `/workspaces/{id}/scan` | Trigger immediate reconcile (owner/editor) |
+| GET | `/workspaces/{id}/user-search?q=` | Username prefix autocomplete for invites (owner only); excludes self + existing members |
+| GET | `/workspaces/{id}/members` | List members with roles |
+| POST | `/workspaces/{id}/members` | Add member `{username, role}` (owner only) |
+| PATCH | `/workspaces/{id}/members/{user_id}` | Change a member's role (owner only) |
+| DELETE | `/workspaces/{id}/members/{user_id}` | Revoke access (owner only) |
+
+> Role enforcement: `403` when the caller lacks the required role, `400` on invalid input (unknown username, bad role, inviting the owner), `404` when the workspace is not visible to the caller.
 
 ### Jobs
 | Method | Path | Description |
@@ -224,8 +240,8 @@ The Pipeline Manager UI validates chain compatibility: if a node's required `con
 | `JobService` | List jobs, requeue via RabbitMQ |
 | `SearchService` | Keyword / semantic / hybrid search; workspace-scoped filtering |
 | `PipelineService` | CRUD for pipeline nodes and pipeline definitions; builds doubly-linked node chain |
-| `WorkspaceService` | CRUD for workspace definitions |
-| `StatsService` | Aggregate counts + recent jobs |
+| `WorkspaceService` | CRUD for workspace definitions; **RBAC enforcement** (owner/editor/viewer); member add/remove/role + username search |
+| `StatsService` | Aggregate counts + recent jobs (scoped to the caller's accessible workspaces) |
 
 ---
 
@@ -257,9 +273,14 @@ All views share the **dark glassmorphic theme**: `bg-slate-950` base, violet/blu
 
 ### 7.3 Workspace Manager (`ImageUploadView.js`)
 - Card grid; active workspaces have violet top-border glow
-- Each card shows: name, path, status badge, linked pipeline chips, extensions, Scan Now button
+- Each card shows: name, path, status badge, **role badge** (for shared workspaces where you are not the owner), linked pipeline chips, extensions, Scan Now button
+- **Role-gated controls**: viewers see no edit/scan/delete; editors can edit + scan; only the owner sees delete and member management
 - Create/Edit right-side drawer with blurred backdrop:
   - Name, directory path, extension multi-select, pipeline multi-select, active toggle
+- **Members modal** (people icon on each card):
+  - Owner-only invite box: debounced **username autocomplete** (`/user-search`) with a suggestions dropdown and a Viewer/Editor role selector; selecting a suggestion grants access immediately
+  - Member list with inline role change (Viewer/Editor) and a revoke (✕) button; the owner row is read-only
+  - Visible read-only to members; management controls render only for the owner
 
 ### 7.4 Statistics View (`ProgressTrackingView.js`)
 - **Stat cards row**: Total Images | Active Workspaces | Pipelines Defined | Jobs Completed | Jobs Failed | Processing Now
@@ -297,6 +318,8 @@ All views share the **dark glassmorphic theme**: `bg-slate-950` base, violet/blu
 | `MONGO_DB_NAME` | `pixquery` | Database name |
 | `RABBITMQ_URL` | `amqp://guest:guest@localhost/` | RabbitMQ AMQP URL |
 | `RABBITMQ_QUEUE` | `image_task` | Queue name |
+| `RABBITMQ_CONNECT_TIMEOUT` | `60` | Seconds to retry broker connection on startup before giving up (§10.1.7) |
+| `RUN_MIGRATIONS_ON_STARTUP` | `true` | Apply pending DB migrations when the API starts; set `false` to run `python -m src.migrations` explicitly (§10.2) |
 | `WEAVIATE_URL` | `http://localhost:8080` | Weaviate REST base URL |
 | `WATCH_ROOT` | `~/pixquery_photos` | Legacy default watch path (superseded by workspaces) |
 | `WATCH_ROOT_ID` | `default` | Legacy watch root identifier |
@@ -320,8 +343,105 @@ Optional parameters: `threshold` (minimum score, only meaningful for semantic/hy
 
 - JWT-based authentication (`python-jose` + `bcrypt` password hashing)
 - All API routes except `/auth/register` and `/auth/login` require a valid Bearer token
-- `owner_id` scoping on all query/mutation operations (users can only read/write their own data)
+- **Workspace-membership scoping** on data operations: a user can only read assets/jobs/stats for workspaces they own or are a member of, and only the owner can manage membership or delete a workspace (see §10.1). This replaces the earlier single-`owner_id`-per-asset model.
 - CORS origin currently set to `http://localhost:3000`; update `allow_origins` in `app.py` for production
+
+---
+
+## 10.1 Access Control, Sharing & Workspace-Scoped Processing (2026 refactor)
+
+This section documents the multi-tenancy refactor in detail: the problem, the model we chose, the mechanics, and the migration consequences.
+
+### 10.1.1 Motivation
+
+The original design keyed an image **asset** on a globally-unique `content_sha256` and granted access via a single `owner_id` on that asset. Two problems followed once workspaces could belong to (or be shared with) different people:
+
+1. **No processing isolation.** Identical bytes in two workspaces produced *one* asset, *one* job, and *one* set of outputs/vectors. A workspace meant "for me" and another meant "for someone else" would share derived data. The dedup also created a cross-tenant existence side-channel (a second uploader's job completing instantly reveals the content already exists).
+2. **First-writer-wins ownership bug.** `upsert_asset` set `owner_id` only if not already set, and the asset was global-unique on `content_sha256`. So whoever ingested a given image *first* owned it; a second user with the same bytes silently lost it from their owner-scoped listings/stats.
+
+**Requirement that fixed the design:** a workspace can be **shared with multiple people**, and the same image in two *different* workspaces must be processed and stored twice. Therefore the unit of isolation is the **workspace**, and access is **workspace membership** — not the user, and not the asset's owner.
+
+### 10.1.2 Membership & RBAC model
+
+`workspace_definitions.members[]` holds `{user_id, role, added_at}`; the creator is tracked by `owner_id` with the implicit `owner` role. Roles:
+
+| Capability | Owner | Editor | Viewer |
+|---|---|---|---|
+| View / search images in the workspace | ✅ | ✅ | ✅ |
+| Edit workspace settings + pipelines, trigger scans | ✅ | ✅ | ❌ |
+| Add / remove members, change roles, delete workspace | ✅ | ❌ | ❌ |
+
+Enforcement lives in `WorkspaceService` (`role_for()` + `_can_view/_can_edit/_can_manage`). Invites are **immediate-grant** (no accept step): the owner types a username, the `/user-search` endpoint suggests matches (case-insensitive prefix, excluding self and existing members), and selecting one adds the member right away.
+
+### 10.1.3 Per-workspace processing & dedup
+
+Asset identity changed from `content_sha256` to **`(workspace_id, content_sha256)`**, and the job key includes `workspace_id`. The cascade is automatic:
+
+```
+same bytes in workspace A and workspace B
+        │
+        ├─ upsert_asset(workspace_id=A) → asset Aʹ   (distinct _id)
+        └─ upsert_asset(workspace_id=B) → asset Bʹ   (distinct _id)
+                │                                │
+        ensure_processing_job(Aʹ)        ensure_processing_job(Bʹ)   → two jobs
+                │                                │
+        model_outputs + Weaviate(Aʹ)     model_outputs + Weaviate(Bʹ) → two of everything
+```
+
+Within a single workspace, dedup still holds: the same content at two paths, or a re-scan, resolves to one asset (the `(workspace_id, content_sha256)` lookup) and one job per pipeline version. Editing a pipeline changes its `pipeline_version` hash, which creates a fresh job and reprocesses — unchanged from before.
+
+### 10.1.4 Access-scoping mechanics
+
+Three repository helpers replace `owner_id`-based filtering:
+
+- `accessible_workspace_ids(user_id)` — workspaces owned or joined (`list_workspaces` now returns owner **or** member via `{$or: [{owner_id}, {members.user_id}]}`).
+- `accessible_asset_ids(user_id)` — asset IDs that have an **active `file_observation`** in an accessible workspace. Driving access off `file_observations` (which always carried `workspace_id`) means **no data migration is required** — legacy assets without a `workspace_id` tag stay visible.
+- `can_access_asset(user_id, asset_id)` — single-asset gate for `/images/{id}`.
+
+These feed `list_active_assets`, `ImageService.get_image`, `get_stats_overview`, and `list_recent_jobs`. **Search needed no changes** — it already routed through `list_active_assets` / `_allowed_asset_ids`.
+
+### 10.1.5 Cascade delete
+
+Deleting a workspace removes its `file_observations`, then any asset left with no observation in another workspace — along with that asset's jobs, `model_outputs`, and `pipeline_runs`. Because everything keys on a per-workspace `asset_id`, this is a clean cascade with **no reference counting**. Orphaned Weaviate vectors are intentionally left: semantic search resolves each hit back through MongoDB and skips assets that no longer exist, so stale vectors are inert (a future enhancement could prune them).
+
+### 10.1.6 Migration & operational notes
+
+- **Restart all backend processes after deploying.** `ensure_indexes()` runs on repository init and is what **drops the old global-unique `content_sha256_1` index** and creates the compound `(workspace_id, content_sha256)` index. Until the old index is gone, a second workspace's identical content would be rejected by the surviving uniqueness constraint.
+- **One-time reprocessing wave.** Pre-existing assets/jobs lack `workspace_id`. A re-scan creates per-workspace assets (the `(workspace_id, sha)` lookup won't match the legacy `workspace_id: null` row) and new jobs, so each affected image is reprocessed once into its workspace-scoped form. Legacy rows become inert and are removed when their workspace is deleted.
+- **Weaviate** `ImageEmbedding` / `TextEmbedding` classes gained a declared `workspace_id` property; access is still enforced Mongo-side via `accessible_asset_ids`, so this is forward-looking metadata rather than the access boundary.
+
+### 10.1.7 RabbitMQ startup resilience (related fix)
+
+The ingestion/worker processes previously crashed if started before RabbitMQ finished booting (`AMQPConnectionError: Server connection unexpectedly closed`). Connections now retry with exponential backoff (`_connect_with_retry`, 1 s → 5 s cap) up to `RABBITMQ_CONNECT_TIMEOUT` (default 60 s), so process start order no longer matters.
+
+---
+
+## 10.2 Database Models & Migrations
+
+Introduced alongside the access-control refactor to make the schema explicit and evolvable.
+
+### 10.2.1 Pydantic document models (`backend/src/models/`)
+
+Every collection has a Pydantic v2 model (`User`, `ImageAsset`, `FileObservation`, `ProcessingJob`, `PipelineRun`, `ModelOutput`, `WorkspaceDefinition` + embedded `WorkspaceMember`, `PipelineNode`, `PipelineDefinition`). All top-level documents extend `BaseDocument`, which maps `id ↔ _id` and exposes `to_doc()` (dumps with the `_id` alias). The repository constructs documents from these models, replacing ~10 inline dict literals — so field names, defaults, and types live in one validated place. Models are intentionally `extra="ignore"` on read so legacy documents still load.
+
+> Dependency note: `pydantic>=2.7` is now a **core** dependency (was only transitively present via FastAPI). It's been added to `pyproject.toml` `[project.dependencies]` and to `requirements.txt` / `requirements.worker.txt` / `requirements.monitor.txt`, because the worker and monitor import the repository and therefore the models.
+
+### 10.2.2 Migration runner (`backend/src/migrations/`)
+
+A lightweight, dependency-free runner:
+
+- **`schema_migrations` collection** records applied migration ids (`{_id, description, applied_at}`).
+- **`MIGRATIONS`** is an append-only, ordered list of `Migration(id, description, upgrade)`; `run_migrations(db)` applies any not yet recorded, in order, exactly once.
+- **`0001_baseline`** establishes the current schema by instantiating the repository (which idempotently creates indexes — including the workspace-scoped ones and the legacy-index drop — and seeds system nodes), so index definitions stay in one place.
+
+**Running migrations**
+```bash
+python -m src.migrations            # apply pending migrations
+python -m src.migrations --status   # list applied / pending
+```
+By default the API also applies pending migrations on startup (`RUN_MIGRATIONS_ON_STARTUP=true`); set it to `false` to run them only as an explicit deploy step.
+
+**Adding a migration:** append a new `Migration("0002_…", "…", upgrade_fn)` to `MIGRATIONS`; never edit or reorder a released one. `upgrade(db)` receives the raw database handle and performs the data/schema transformation (e.g. add + backfill a field).
 
 ---
 
@@ -353,6 +473,9 @@ Optional parameters: `threshold` (minimum score, only meaningful for semantic/hy
 ```bash
 # Infrastructure (MongoDB, RabbitMQ, Weaviate)
 docker compose -f docker-compose.infra.yml up -d
+
+# Database migrations (idempotent; API also auto-runs these on startup)
+cd backend && python -m src.migrations
 
 # Backend API
 cd backend && pip install -r requirements.txt

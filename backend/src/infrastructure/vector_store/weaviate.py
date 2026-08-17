@@ -18,6 +18,7 @@ class WeaviateEmbeddingStore:
             "ImageEmbedding": [
                 {"name": "asset_id", "dataType": ["text"]},
                 {"name": "content_sha256", "dataType": ["text"]},
+                {"name": "workspace_id", "dataType": ["text"]},
                 {"name": "pipeline_id", "dataType": ["text"]},
                 {"name": "pipeline_version", "dataType": ["text"]},
                 {"name": "active", "dataType": ["boolean"]},
@@ -25,6 +26,7 @@ class WeaviateEmbeddingStore:
             "TextEmbedding": [
                 {"name": "asset_id", "dataType": ["text"]},
                 {"name": "content_sha256", "dataType": ["text"]},
+                {"name": "workspace_id", "dataType": ["text"]},
                 {"name": "text", "dataType": ["text"]},
                 {"name": "pipeline_id", "dataType": ["text"]},
                 {"name": "pipeline_version", "dataType": ["text"]},

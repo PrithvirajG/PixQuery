@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from src.api.dependencies import get_current_user, get_workspace_service
 from src.config import RABBITMQ_URL, SCAN_COMMAND_QUEUE
 from src.services import WorkspaceService
+from src.services.workspace_service import WorkspaceAccessError, WorkspaceValidationError
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -110,9 +111,12 @@ async def update_workspace(
     current_user: dict = Depends(get_current_user),
 ):
     data = {k: v for k, v in body.model_dump().items() if v is not None}
-    updated = workspace_service.update_workspace(
-        workspace_id, owner_id=current_user["_id"], data=data
-    )
+    try:
+        updated = workspace_service.update_workspace(
+            workspace_id, owner_id=current_user["_id"], data=data
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return updated
@@ -124,7 +128,10 @@ async def delete_workspace(
     workspace_service: WorkspaceService = Depends(get_workspace_service),
     current_user: dict = Depends(get_current_user),
 ):
-    deleted = workspace_service.delete_workspace(workspace_id, owner_id=current_user["_id"])
+    try:
+        deleted = workspace_service.delete_workspace(workspace_id, owner_id=current_user["_id"])
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     if not deleted:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
@@ -135,7 +142,12 @@ async def scan_workspace(
     workspace_service: WorkspaceService = Depends(get_workspace_service),
     current_user: dict = Depends(get_current_user),
 ):
-    workspace = workspace_service.trigger_scan(workspace_id, owner_id=current_user["_id"])
+    try:
+        workspace = workspace_service.trigger_scan(workspace_id, owner_id=current_user["_id"])
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except WorkspaceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
@@ -158,3 +170,106 @@ async def scan_workspace(
         pass
 
     return {"message": "Scan triggered", "workspace": workspace}
+
+
+# ──────────────────────────────────────────────────────────────
+# Membership
+# ──────────────────────────────────────────────────────────────
+
+
+class MemberAdd(BaseModel):
+    username: str
+    role: str = "viewer"
+
+
+class MemberRoleUpdate(BaseModel):
+    role: str
+
+
+@router.get("/{workspace_id}/user-search")
+async def search_workspace_users(
+    workspace_id: str,
+    q: str = Query(default="", description="Username prefix to search for"),
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        results = workspace_service.search_users_for_workspace(
+            workspace_id, actor_id=current_user["_id"], query=q
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if results is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return results
+
+
+@router.get("/{workspace_id}/members")
+async def list_workspace_members(
+    workspace_id: str,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    members = workspace_service.list_members(workspace_id, actor_id=current_user["_id"])
+    if members is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return members
+
+
+@router.post("/{workspace_id}/members", status_code=201)
+async def add_workspace_member(
+    workspace_id: str,
+    body: MemberAdd,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        members = workspace_service.add_member(
+            workspace_id, actor_id=current_user["_id"], username=body.username, role=body.role
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if members is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return members
+
+
+@router.patch("/{workspace_id}/members/{member_id}")
+async def update_workspace_member(
+    workspace_id: str,
+    member_id: str,
+    body: MemberRoleUpdate,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        members = workspace_service.update_member_role(
+            workspace_id, member_id, actor_id=current_user["_id"], role=body.role
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if members is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return members
+
+
+@router.delete("/{workspace_id}/members/{member_id}")
+async def remove_workspace_member(
+    workspace_id: str,
+    member_id: str,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        members = workspace_service.remove_member(
+            workspace_id, member_id, actor_id=current_user["_id"]
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if members is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return members

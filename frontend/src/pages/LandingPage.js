@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { errorMessage } from '../lib/apiError';
 
 function LandingPage() {
   const { login, register } = useAuth();
@@ -68,10 +69,7 @@ function LandingPage() {
       }
       setShowAuthModal(false);
     } catch (err) {
-      setError(
-        err.response?.data?.detail || 
-        'An error occurred. Please check your credentials.'
-      );
+      setError(errorMessage(err, 'An error occurred. Please check your credentials.'));
     } finally {
       setLoading(false);
     }

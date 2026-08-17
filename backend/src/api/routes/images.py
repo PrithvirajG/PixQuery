@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
-from src.api.dependencies import get_image_service, get_current_user, get_pipeline_repository
+from src.api.dependencies import get_image_service, get_current_user
 from src.services import ImageService
 
 router = APIRouter(prefix="/images", tags=["images"])
@@ -38,23 +38,12 @@ async def get_thumbnail(
 async def get_image_detail(
     asset_id: str,
     image_service: ImageService = Depends(get_image_service),
-    repo=Depends(get_pipeline_repository),
     current_user: dict = Depends(get_current_user),
 ):
-    asset = image_service.get_image(asset_id, user_id=current_user["_id"])
-    if not asset:
+    detail = image_service.get_image_detail(asset_id, user_id=current_user["_id"])
+    if not detail:
         raise HTTPException(status_code=404, detail="Image not found")
-
-    outputs = list(repo.model_outputs.find({"asset_id": asset_id}))
-    caption = next(
-        (o["payload"].get("text", "") for o in outputs if o.get("output_type") == "caption"),
-        "",
-    )
-    detections = next(
-        (o["payload"].get("detections", []) for o in outputs if o.get("output_type") == "detections"),
-        [],
-    )
-    return {**asset, "description": caption, "detections": detections}
+    return detail
 
 
 @router.get("/{asset_id}")
