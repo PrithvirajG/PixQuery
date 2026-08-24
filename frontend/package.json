@@ -27,7 +27,8 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "build:css": "npx @tailwindcss/cli -i src/index.css -o src/output.css --minify",
-    "watch:css": "npx @tailwindcss/cli -i src/index.css -o src/output.css --watch"
+    "watch:css": "npx @tailwindcss/cli -i src/index.css -o src/output.css --watch",
+    "test:e2e": "playwright test"
   },
   "eslintConfig": {
     "extends": [
@@ -54,5 +55,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }
