@@ -104,8 +104,12 @@ class _MemoryDatabase(dict):
 
 
 class InMemoryPipelineRepository(MongoPipelineRepository):
-    def __init__(self):
-        super().__init__(_MemoryDatabase())
+    def __init__(self, event_sink=None):
+        # ``events`` collects everything emitted, so a test can assert on the live
+        # updates a change produces without standing up a broker. Passing an
+        # explicit sink still works and takes precedence.
+        self.events: list = []
+        super().__init__(_MemoryDatabase(), event_sink=event_sink or self.events.append)
 
 
 def _matches(doc, query):
@@ -135,10 +139,22 @@ def _matches(doc, query):
             if doc.get(key) in value["$nin"]:
                 return False
         elif isinstance(value, dict) and "$in" in value:
-            if doc.get(key) not in value["$in"]:
+            field = doc.get(key)
+            # Mongo's $in matches if an array field shares ANY element with the list.
+            if isinstance(field, list):
+                if not any(item in value["$in"] for item in field):
+                    return False
+            elif field not in value["$in"]:
                 return False
-        elif doc.get(key) != value:
-            return False
+        else:
+            field = doc.get(key)
+            # Equality against an array field is array-contains in Mongo
+            # (e.g. {"pipeline_ids": "p1"} matches a doc whose list holds "p1").
+            if isinstance(field, list) and not isinstance(value, list):
+                if value not in field:
+                    return False
+            elif field != value:
+                return False
     return True
 
 

@@ -24,3 +24,12 @@ yarn-error.log*
 
 *.log
 *.db
+
+# design-sync (claude.ai/design) — staged scripts, build output, and
+# machine-local state. The durable set (config.json, NOTES.md, conventions.md,
+# previews/, overrides/) is NOT listed here and IS committed.
+/.ds-sync/
+/ds-bundle/
+/.design-sync/.cache/
+/.design-sync/learnings/
+/.design-sync/node_modules

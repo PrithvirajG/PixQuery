@@ -15,8 +15,8 @@ import {
   SelectControl,
   Photo,
 } from '../aperture/kit';
+import { API_BASE as API } from '../lib/apiBase';
 
-const API = 'http://localhost:8000';
 const PAGE_SIZE = 24;
 
 const MODES = [

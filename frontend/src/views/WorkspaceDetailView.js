@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { errorMessage } from '../lib/apiError';
+import { API_BASE as API } from '../lib/apiBase';
 import {
   AP,
   STATUS,
@@ -21,8 +22,6 @@ import {
   StatBlock,
   MetricRing,
 } from '../aperture/kit';
-
-const API = 'http://localhost:8000';
 const STLABEL = { run: 'Running', ok: 'Succeeded', err: 'Failed', queue: 'Queued', idle: 'Never run' };
 
 function pipeState(agg) {

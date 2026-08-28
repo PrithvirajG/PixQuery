@@ -1,5 +1,7 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios';
+import { API_BASE as API } from '../lib/apiBase';
+import { setEventToken } from '../lib/eventSocket';
 
 const AuthContext = createContext(null);
 
@@ -7,6 +9,12 @@ export const AuthProvider = ({ children }) => {
   const [token, setToken] = useState(localStorage.getItem('pixquery_token') || null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Keep the live-event socket authenticated with the same token as the REST
+  // calls, so logging in connects it and logging out tears it down.
+  useEffect(() => {
+    setEventToken(token);
+  }, [token]);
 
   // Set default authorization header and request interceptor for axios
   useEffect(() => {
@@ -24,7 +32,7 @@ export const AuthProvider = ({ children }) => {
 
     // Fetch user profile if token is present
     if (token) {
-      axios.get('http://localhost:8000/auth/me')
+      axios.get(`${API}/auth/me`)
         .then(res => {
           setUser(res.data);
           setLoading(false);
@@ -46,7 +54,7 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (username, password) => {
     try {
-      const res = await axios.post('http://localhost:8000/auth/login', { username, password });
+      const res = await axios.post(`${API}/auth/login`, { username, password });
       const { access_token } = res.data;
       localStorage.setItem('pixquery_token', access_token);
       setToken(access_token);
@@ -59,7 +67,7 @@ export const AuthProvider = ({ children }) => {
 
   const register = async (username, password) => {
     try {
-      await axios.post('http://localhost:8000/auth/register', { username, password });
+      await axios.post(`${API}/auth/register`, { username, password });
       // Immediately log in after successful registration
       return await login(username, password);
     } catch (err) {

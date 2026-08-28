@@ -80,7 +80,6 @@ class PipelineService:
             description=data.get("description", ""),
             nodes=nodes,
             edges=edges,
-            extract_metadata=bool(data.get("extract_metadata", False)),
         )
         return serialize_document(pipeline)
 
@@ -99,8 +98,6 @@ class PipelineService:
             updates["nodes"], updates["edges"] = _build_graph(
                 data["nodes"], data.get("edges")
             )
-        if "extract_metadata" in data:
-            updates["extract_metadata"] = bool(data["extract_metadata"])
         updated = self.repository.update_pipeline(pipeline_id, updates)
         return serialize_document(updated) if updated else None
 

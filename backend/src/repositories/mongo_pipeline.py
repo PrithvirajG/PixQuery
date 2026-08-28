@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
+from src.events import (
+    Event,
+    outputs_cleared_event,
+    pipeline_state_event,
+)
 from src.models import (
     DEFAULT_EXTENSIONS,
     FileObservation,
@@ -21,10 +27,23 @@ from src.models import (
 # Re-exported for back-compat: callers (and the in-memory repo) import utcnow from here.
 __all__ = ["MongoPipelineRepository", "utcnow"]
 
+_logger = logging.getLogger("pixquery.repository")
+
 
 class MongoPipelineRepository:
-    def __init__(self, database):
+    """Mongo-backed data access, optionally announcing state changes as events.
+
+    Job lifecycle transitions all funnel through this class from all three
+    processes, which makes it the one place where "something changed" is always
+    known. ``event_sink`` is how that reaches a UI: pass an
+    :class:`~src.infrastructure.messaging.events.EventBus`'s ``emit`` and every
+    transition is broadcast; leave it ``None`` (tests, migrations, one-shot
+    scripts) and the repository behaves exactly as it always has.
+    """
+
+    def __init__(self, database, event_sink: Callable[[Event], None] | None = None):
         self.db = database
+        self._event_sink = event_sink
         self.image_assets = database["image_assets"]
         self.file_observations = database["file_observations"]
         self.processing_jobs = database["processing_jobs"]
@@ -37,10 +56,53 @@ class MongoPipelineRepository:
         self.ensure_indexes()
 
     @classmethod
-    def from_uri(cls, mongo_uri: str, database_name: str) -> "MongoPipelineRepository":
+    def from_uri(
+        cls,
+        mongo_uri: str,
+        database_name: str,
+        event_sink: Callable[[Event], None] | None = None,
+    ) -> "MongoPipelineRepository":
         from pymongo import MongoClient
 
-        return cls(MongoClient(mongo_uri)[database_name])
+        return cls(MongoClient(mongo_uri)[database_name], event_sink=event_sink)
+
+    def set_event_sink(self, event_sink: Callable[[Event], None] | None) -> None:
+        """Attach (or detach) the event sink after construction.
+
+        Processes build their repository before the asyncio loop exists, so the
+        bus is necessarily wired up afterwards.
+        """
+        self._event_sink = event_sink
+
+    def emit_event(self, event: Event) -> None:
+        """Publish a domain event, swallowing anything that goes wrong.
+
+        Emitting must never be able to fail a pipeline run or an API request:
+        live updates are a convenience layered on top of data that is already
+        durably written.
+        """
+        sink = self._event_sink
+        if sink is None:
+            return
+        try:
+            sink(event)
+        except Exception:
+            _logger.debug("Event sink raised; ignoring", exc_info=True)
+
+    def _emit_job_state(self, job: dict[str, Any] | None, state: str) -> None:
+        """Announce a job's new state, resolving the identity fields off the job."""
+        if not job or self._event_sink is None:
+            return
+        self.emit_event(
+            pipeline_state_event(
+                workspace_id=job.get("workspace_id"),
+                asset_id=job.get("asset_id"),
+                pipeline_id=job.get("pipeline_id"),
+                state=state,
+                job_id=job.get("_id"),
+                error=job.get("last_error"),
+            )
+        )
 
     def ensure_indexes(self) -> None:
         # Assets and jobs are scoped per workspace: the same image content in two
@@ -188,16 +250,37 @@ class MongoPipelineRepository:
         },
     ]
 
+    # Fields of a system node that are owned by the code, not the database. They
+    # describe what the executor actually accepts and emits, so a stale copy in
+    # Mongo silently lies to the pipeline editor (wrong knobs, wrong ports).
+    _SYSTEM_NODE_MANAGED_FIELDS = (
+        "name",
+        "description",
+        "context_inputs",
+        "context_outputs",
+        "config_schema",
+        "default_config",
+    )
+
     def _seed_system_nodes(self) -> None:
         # Upsert (not check-then-insert): the API, worker, and monitor processes
         # all seed at startup, so a non-atomic insert races and creates duplicate
         # system nodes. With the partial-unique index on system node_type, this
         # upsert is idempotent under concurrency.
+        #
+        # The managed fields are $set on every startup, NOT $setOnInsert: they must
+        # track the executor as it changes. A node seeded by an older build would
+        # otherwise keep advertising config keys the executor no longer reads (and
+        # hide the ones it does) forever, since its _id already exists. Identity
+        # fields (_id, owner_id, created_at) stay $setOnInsert so they're stable,
+        # and per-pipeline `config_overrides` are untouched — those are user data.
         for node_def in self._SYSTEM_NODES:
             doc = PipelineNode(owner_id="system", **node_def).to_doc()
+            managed = {k: doc[k] for k in self._SYSTEM_NODE_MANAGED_FIELDS if k in doc}
+            on_insert = {k: v for k, v in doc.items() if k not in managed}
             self.pipeline_nodes_col.update_one(
                 {"node_type": node_def["node_type"], "owner_id": "system"},
-                {"$setOnInsert": doc},
+                {"$set": managed, "$setOnInsert": on_insert},
                 upsert=True,
             )
 
@@ -252,6 +335,92 @@ class MongoPipelineRepository:
         ).to_doc()
         self.image_assets.insert_one(asset)
         return asset
+
+    def update_asset_metadata(self, asset_id: str, metadata: dict[str, Any]) -> None:
+        self.image_assets.update_one({"_id": asset_id}, {"$set": {"metadata": metadata}})
+
+    def clear_pipeline_outputs(self, workspace_id: str, pipeline_id: str) -> dict[str, int]:
+        """Delete everything this pipeline produced in this workspace: its
+        model_outputs, its pipeline_runs, and its processing_jobs.
+
+        Dropping the job rows (rather than resetting their status) is what returns
+        each (asset, pipeline) pair to NOT_STARTED — ``_pipeline_state`` treats a
+        missing job as "never dispatched". A later scan will recreate the jobs
+        naturally via ``ensure_processing_job``; until then nothing is queued and
+        nothing reprocesses on its own.
+        """
+        query = {"workspace_id": workspace_id, "pipeline_id": pipeline_id}
+        job_ids = [j["_id"] for j in self.processing_jobs.find(query)]
+        outputs_deleted = self.model_outputs.delete_many(query).deleted_count
+        runs_deleted = 0
+        if job_ids:
+            runs_deleted = self.pipeline_runs.delete_many(
+                {"job_id": {"$in": job_ids}}
+            ).deleted_count
+        jobs_deleted = self.processing_jobs.delete_many(query).deleted_count
+        counts = {
+            "outputs_deleted": outputs_deleted,
+            "runs_deleted": runs_deleted,
+            "jobs_deleted": jobs_deleted,
+        }
+        self.emit_event(
+            outputs_cleared_event(
+                workspace_id=workspace_id, pipeline_id=pipeline_id, counts=counts
+            )
+        )
+        return counts
+
+    def clear_asset_pipeline_outputs(
+        self, asset_id: str, pipeline_id: str
+    ) -> dict[str, int]:
+        """Clear one pipeline's results for a **single** image.
+
+        The per-workspace sibling above is the bulk operation; this is the one
+        behind the delete control on an image's own pipeline card. Same semantics,
+        narrower blast radius: dropping the job row is what returns this one
+        (asset, pipeline) pair to NOT_STARTED, leaving every other image in the
+        workspace untouched.
+        """
+        query = {"asset_id": asset_id, "pipeline_id": pipeline_id}
+        jobs = list(self.processing_jobs.find(query))
+        job_ids = [j["_id"] for j in jobs]
+        workspace_id = next((j.get("workspace_id") for j in jobs), None)
+
+        # Resolve the runs *first*: outputs written before pipeline_id was
+        # denormalized onto them carry no pipeline_id, so their only link back to
+        # this pipeline is their run. Deleting the runs first would strand them.
+        run_ids = {r["_id"] for r in self.pipeline_runs.find(query)}
+        if job_ids:
+            run_ids |= {
+                r["_id"] for r in self.pipeline_runs.find({"job_id": {"$in": job_ids}})
+            }
+        run_ids = list(run_ids)
+        outputs_deleted = self.model_outputs.delete_many(query).deleted_count
+        if run_ids:
+            outputs_deleted += self.model_outputs.delete_many(
+                {"pipeline_run_id": {"$in": run_ids}}
+            ).deleted_count
+            runs_deleted = self.pipeline_runs.delete_many(
+                {"_id": {"$in": run_ids}}
+            ).deleted_count
+        else:
+            runs_deleted = 0
+        jobs_deleted = self.processing_jobs.delete_many(query).deleted_count
+
+        counts = {
+            "outputs_deleted": outputs_deleted,
+            "runs_deleted": runs_deleted,
+            "jobs_deleted": jobs_deleted,
+        }
+        self.emit_event(
+            outputs_cleared_event(
+                workspace_id=workspace_id,
+                pipeline_id=pipeline_id,
+                asset_id=asset_id,
+                counts=counts,
+            )
+        )
+        return counts
 
     def upsert_file_observation(
         self,
@@ -311,6 +480,9 @@ class MongoPipelineRepository:
             updated_at=now,
         ).to_doc()
         self.processing_jobs.insert_one(job)
+        # A brand-new job is already "queued" — tell the UI now so an image picked
+        # up by the monitor lights up without waiting for a poll.
+        self._emit_job_state(job, "queued")
         return job, True
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -334,7 +506,9 @@ class MongoPipelineRepository:
                 "last_error": None,
             }},
         )
-        return self.get_job(job_id)
+        job = self.get_job(job_id)
+        self._emit_job_state(job, "queued")
+        return job
 
     def start_job(self, job_id: str) -> dict[str, Any]:
         now = utcnow()
@@ -369,6 +543,9 @@ class MongoPipelineRepository:
         ).to_doc()
         self.pipeline_runs.insert_one(run)
         job["pipeline_run_id"] = run["_id"]
+        # Prior outputs were just dropped above, so a UI showing them is now stale:
+        # this is exactly the moment to switch it to a loading state.
+        self._emit_job_state(job, "processing")
         return job
 
     def complete_job(self, job_id: str, pipeline_run_id: str) -> None:
@@ -381,6 +558,11 @@ class MongoPipelineRepository:
             {"_id": pipeline_run_id},
             {"$set": {"status": "completed", "finished_at": now, "error": None}},
         )
+        if self._event_sink is not None:
+            job = self.get_job(job_id)
+            if job:
+                job["last_error"] = None
+            self._emit_job_state(job, "completed")
 
     def fail_job(
         self,
@@ -416,6 +598,11 @@ class MongoPipelineRepository:
                 {"_id": pipeline_run_id},
                 {"$set": {"status": "failed", "finished_at": now, "error": error}},
             )
+        # `final_status` is "queued" when a retry is still pending, so the UI shows
+        # the pair going back to waiting rather than reporting a failure it will
+        # recover from on its own.
+        if job:
+            self._emit_job_state({**job, "last_error": error}, final_status)
         return final_status
 
     def add_model_output(
@@ -589,7 +776,6 @@ class MongoPipelineRepository:
         description: str = "",
         nodes: list[dict[str, Any]] | None = None,
         edges: list[dict[str, Any]] | None = None,
-        extract_metadata: bool = False,
     ) -> dict[str, Any]:
         pipeline = PipelineDefinition(
             name=name,
@@ -597,7 +783,6 @@ class MongoPipelineRepository:
             owner_id=owner_id,
             nodes=nodes or [],
             edges=edges or [],
-            extract_metadata=extract_metadata,
         ).to_doc()
         self.pipeline_definitions.insert_one(pipeline)
         return pipeline
@@ -610,8 +795,50 @@ class MongoPipelineRepository:
         return self.get_pipeline(pipeline_id)
 
     def delete_pipeline(self, pipeline_id: str) -> bool:
+        """Delete a pipeline and everything downstream of it.
+
+        Cascade, mirroring ``delete_workspace``: the pipeline's runs, jobs and
+        model outputs go with it (across every workspace), and the id is pulled
+        from any workspace still referencing it — a dangling id would otherwise
+        make the reconciler keep minting jobs for a pipeline that no longer
+        exists. Assets and the shared pipeline-node library are untouched: the
+        images themselves outlive any one pipeline.
+        """
+        runs = list(self.pipeline_runs.find({"pipeline_id": pipeline_id}))
+        run_ids = [r["_id"] for r in runs]
+
+        # Outputs carry a denormalized pipeline_id, but older rows may not — also
+        # sweep anything tied to this pipeline's runs so nothing is orphaned.
+        self.model_outputs.delete_many({"pipeline_id": pipeline_id})
+        if run_ids:
+            self.model_outputs.delete_many({"pipeline_run_id": {"$in": run_ids}})
+        self.pipeline_runs.delete_many({"pipeline_id": pipeline_id})
+        self.processing_jobs.delete_many({"pipeline_id": pipeline_id})
+
+        # Read-modify-write keeps this portable to the in-memory test repository,
+        # which implements only "$set" (no "$pull").
+        affected_workspaces = []
+        for workspace in self.workspace_definitions.find({"pipeline_ids": pipeline_id}):
+            affected_workspaces.append(workspace["_id"])
+            remaining = [p for p in workspace.get("pipeline_ids", []) if p != pipeline_id]
+            self.workspace_definitions.update_one(
+                {"_id": workspace["_id"]}, {"$set": {"pipeline_ids": remaining}}
+            )
+
         result = self.pipeline_definitions.delete_one({"_id": pipeline_id})
-        return result.deleted_count > 0
+        deleted = result.deleted_count > 0
+        if deleted:
+            # One event per affected workspace: any image detail view open on that
+            # workspace drops the section instead of showing outputs that are gone.
+            for workspace_id in affected_workspaces:
+                self.emit_event(
+                    outputs_cleared_event(
+                        workspace_id=workspace_id,
+                        pipeline_id=pipeline_id,
+                        counts={"pipeline_deleted": 1},
+                    )
+                )
+        return deleted
 
     # ──────────────────────────────────────────────────────────────
     # Workspace Definitions

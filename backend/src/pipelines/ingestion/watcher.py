@@ -20,13 +20,14 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from src.config import (
+    EVENTS_ENABLED,
     MONGO_DB_NAME,
     MONGO_URI,
     RABBITMQ_URL,
     SCAN_COMMAND_QUEUE,
     WORKSPACE_REFRESH_INTERVAL,
 )
-from src.infrastructure.messaging import RabbitPublisher
+from src.infrastructure.messaging import EventBus, RabbitPublisher
 from src.pipelines.ingestion.reconciler import FileNotStableError, FilesystemReconciler
 from src.repositories import MongoPipelineRepository
 
@@ -243,6 +244,16 @@ async def start_monitoring() -> None:
     publisher = RabbitPublisher()
     await publisher.connect()
 
+    # The monitor is where a newly-discovered image first becomes a queued job, so
+    # it emits the transition that makes an image appear as "Queued" in an open UI.
+    bus = None
+    if EVENTS_ENABLED:
+        try:
+            bus = await EventBus().start()
+            repository.set_event_sink(bus.emit)
+        except Exception as exc:
+            logger.warning("Live events disabled in monitor: %s", exc)
+
     loop = asyncio.get_running_loop()
     watcher = WorkspaceWatcher(repository, publisher, loop)
 
@@ -269,5 +280,8 @@ async def start_monitoring() -> None:
         scan_task.cancel()
         watcher.stop_all()
         await publisher.close()
+        if bus:
+            repository.set_event_sink(None)
+            await bus.close()
 
 

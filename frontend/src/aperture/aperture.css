@@ -96,12 +96,51 @@
 .ap-pulse-dot {
   animation: apBlink 1s step-end infinite;
 }
+/* Loading placeholder for content the backend is still producing. A sheen sweeps
+   left-to-right across a dim block, reading as "coming" rather than "empty". */
+@keyframes apShimmer {
+  0% {
+    background-position: -220% 0;
+  }
+  100% {
+    background-position: 220% 0;
+  }
+}
+.ap-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(139, 123, 247, 0.16) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  background-size: 220% 100%;
+  animation: apShimmer 1.5s ease-in-out infinite;
+}
+
+/* A button's own icon spinning in place of its normal glyph while its action
+   is in flight (see ActBtn's `loading` prop). */
+@keyframes apSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ap-spin {
+  animation: apSpin 0.85s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ap-pulse {
     animation: none;
     opacity: 0;
   }
   .ap-pulse-dot {
+    animation: none;
+  }
+  /* Keep the placeholder visible, just stop it moving. */
+  .ap-shimmer {
+    animation: none;
+  }
+  .ap-spin {
     animation: none;
   }
 }

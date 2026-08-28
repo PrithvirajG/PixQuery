@@ -43,48 +43,72 @@ class ImageService:
             **asset,
             "description": caption,
             "detections": detections,
-            "provenance": self._build_provenance(asset_id, outputs),
+            "provenance": self._build_provenance(asset, outputs),
         }
 
-    def _build_provenance(self, asset_id: str, outputs: list[dict]):
-        """Group an asset's outputs by the pipeline that produced them.
+    def _build_provenance(self, asset: dict, outputs: list[dict]):
+        """One entry per pipeline attached to this asset's workspace, with its state.
 
-        Each output carries a denormalized ``pipeline_id`` (falling back to its
-        run's pipeline for older rows); we resolve the pipeline name, attach the
-        latest run's status, and expose a compact summary + the payload so the
-        detail view can render real content instead of "not exposed".
+        Driven by the workspace's ``pipeline_ids`` — NOT by which outputs happen to
+        exist — so a pipeline that has never run (or whose outputs were cleared)
+        still gets a section, and the UI can offer "Process"/"Reprocess" for it.
+        Each entry carries a ``state`` derived from the job for this
+        (asset, pipeline) pair; see ``_pipeline_state``.
         """
+        asset_id = asset["_id"]
         runs = list(self.repository.pipeline_runs.find({"asset_id": asset_id}))
         run_by_id = {r["_id"]: r for r in runs}
+        jobs = list(self.repository.processing_jobs.find({"asset_id": asset_id}))
+        job_by_pipeline = {j.get("pipeline_id"): j for j in jobs}
 
-        groups: dict = {}
+        outputs_by_pipeline: dict = {}
         for o in outputs:
             pid = o.get("pipeline_id") or (run_by_id.get(o.get("pipeline_run_id")) or {}).get("pipeline_id")
-            groups.setdefault(pid, []).append(o)
+            outputs_by_pipeline.setdefault(pid, []).append(o)
+
+        workspace = (
+            self.repository.get_workspace(asset["workspace_id"])
+            if asset.get("workspace_id")
+            else None
+        )
+        attached_ids = list((workspace or {}).get("pipeline_ids", []) or [])
+
+        # Attached pipelines always get a section (even with zero outputs, so they
+        # can be run). Pipelines that only have leftover outputs — detached from the
+        # workspace since they ran — are still listed, flagged `attached: False`, so
+        # their data is visible and clearable rather than silently orphaned.
+        detached_ids = [
+            pid for pid in outputs_by_pipeline if pid is not None and pid not in attached_ids
+        ]
 
         pipelines = []
-        for pid, outs in groups.items():
+        for pid in attached_ids + detached_ids:
+            definition = self.repository.get_pipeline(pid)
+            outs = outputs_by_pipeline.get(pid, [])
+            if not definition and not outs:
+                continue  # deleted pipeline with nothing left to show
             outs.sort(key=lambda x: (x.get("order") is None, x.get("order") or 0))
             runs_for = [r for r in runs if r.get("pipeline_id") == pid]
             latest = max(runs_for, key=lambda r: r.get("started_at") or "", default=None)
+            job = job_by_pipeline.get(pid)
             pipelines.append({
                 "pipeline_id": pid,
-                "name": self._pipeline_name(pid),
+                "name": (definition or {}).get("name") or pid,
+                # Only an attached pipeline can be run against this image; a detached
+                # one is read-only history until its outputs are cleared.
+                "attached": pid in attached_ids,
                 "pipeline_version": (latest or {}).get("pipeline_version")
                     or (outs[0].get("pipeline_version") if outs else None),
+                "state": _pipeline_state(job, outs),
+                # Legacy field: the raw pipeline_run status. Prefer `state`.
                 "status": (latest or {}).get("status"),
+                "last_error": (job or {}).get("last_error"),
                 "started_at": _iso((latest or {}).get("started_at")),
                 "finished_at": _iso((latest or {}).get("finished_at")),
                 "outputs": [self._output_item(o) for o in outs],
             })
         pipelines.sort(key=lambda p: (p["name"] or "").lower())
         return {"pipelines": pipelines}
-
-    def _pipeline_name(self, pipeline_id):
-        if not pipeline_id:
-            return "Default pipeline"
-        definition = self.repository.get_pipeline(pipeline_id)
-        return (definition or {}).get("name") or pipeline_id
 
     @staticmethod
     def _output_item(o: dict):
@@ -99,6 +123,38 @@ class ImageService:
             "summary": _summarize(o.get("output_type"), payload),
             "payload": payload,
         }
+
+
+# Lifecycle of one (image, pipeline) pair, as shown in the UI. A pipeline with no
+# job row has never been picked up by the reconciler; clearing a pipeline's outputs
+# deletes its job rows, which returns the pair to NOT_STARTED.
+NOT_STARTED = "not_started"
+QUEUED = "queued"
+PROCESSING = "processing"
+COMPLETED = "completed"
+FAILED = "failed"
+
+_JOB_STATUS_TO_STATE = {
+    "queued": QUEUED,
+    "processing": PROCESSING,
+    "completed": COMPLETED,
+    "failed": FAILED,
+}
+
+
+def _pipeline_state(job: dict | None, outputs: list[dict]) -> str:
+    """Derive the (image, pipeline) state from its processing job.
+
+    No job row means nothing has ever been dispatched for this pair — NOT_STARTED.
+    A job marked ``completed`` whose outputs have since been cleared is also
+    NOT_STARTED: there is nothing to show, and the pair is ready to run again.
+    """
+    if not job:
+        return NOT_STARTED
+    state = _JOB_STATUS_TO_STATE.get(job.get("status"), NOT_STARTED)
+    if state == COMPLETED and not outputs:
+        return NOT_STARTED
+    return state
 
 
 def _summarize(output_type: str, payload: dict) -> str:

@@ -14,6 +14,11 @@ This folder is maintained as an Obsidian-openable markdown knowledge base for Pi
 ## Decisions
 
 - [[Workspace Sharing & Access Control]] — workspace-level tenancy, RBAC (owner/editor/viewer), and per-workspace processing isolation (2026-05-30)
+- [[Remote Access — Tailscale]] — chosen approach for secure remote access to the local instance; planned, not yet implemented (2026-08-26)
+
+## Parked / exploratory
+
+- [[Cloud SaaS & On-Prem — Scope Exploration]] — what a public cloud SaaS + packaged on-prem offering would require; parked against the local-first thesis (2026-08-26)
 
 ## Diagrams
 

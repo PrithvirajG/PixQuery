@@ -309,6 +309,36 @@ _EXIF_TAGS = {
 _GPS_IFD_TAG = 0x8825
 _GPS_LAT_REF, _GPS_LAT, _GPS_LON_REF, _GPS_LON = 1, 2, 3, 4
 
+# Shutter/aperture/ISO/focal length/lens live in the Exif SubIFD (tag 0x8769), not
+# the main IFD0 — a separate sub-dict, same as GPS.
+_EXIF_SUBIFD_TAG = 0x8769
+_EXIF_SUBIFD_TAGS = {
+    33434: "exposure_time",
+    33437: "f_number",
+    34855: "iso",
+    37386: "focal_length",
+    42036: "lens_model",
+}
+
+
+def _to_number(value: Any) -> Any:
+    """Coerce a PIL IFDRational to a plain float; passes through anything else unchanged."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _exif_subifd_to_dict(raw: dict[int, Any]) -> dict[str, Any]:
+    """Map the Exif SubIFD (shutter/aperture/ISO/focal length/lens) to named fields."""
+    result: dict[str, Any] = {}
+    for tag, name in _EXIF_SUBIFD_TAGS.items():
+        value = raw.get(tag)
+        if value in (None, ""):
+            continue
+        result[name] = value.strip() if isinstance(value, str) else _to_number(value)
+    return result
+
 
 def _exif_to_dict(raw: dict[int, Any]) -> dict[str, Any]:
     """Map a raw EXIF tag→value dict (from PIL ``getexif``) to named fields."""
@@ -370,4 +400,10 @@ def extract_image_metadata(path: str | Path) -> dict[str, Any]:
             gps_ifd = None
         if gps_ifd:
             meta.update(_gps_to_dict(dict(gps_ifd)))
+        try:
+            sub_ifd = exif.get_ifd(_EXIF_SUBIFD_TAG)
+        except Exception:
+            sub_ifd = None
+        if sub_ifd:
+            meta.update(_exif_subifd_to_dict(dict(sub_ifd)))
     return meta

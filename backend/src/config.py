@@ -30,6 +30,12 @@ RABBITMQ_CONNECT_TIMEOUT = float(os.getenv("RABBITMQ_CONNECT_TIMEOUT", "60"))
 # manage migrations explicitly via `python -m src.migrations` (e.g. as a deploy step).
 RUN_MIGRATIONS_ON_STARTUP = os.getenv("RUN_MIGRATIONS_ON_STARTUP", "true").lower() in ("1", "true", "yes")
 SCAN_COMMAND_QUEUE = os.getenv("SCAN_COMMAND_QUEUE", "scan_commands")
+# Fanout exchange carrying live UI events (job state changes, stage completions,
+# output deletions) from the worker/monitor processes to the API's WebSockets.
+EVENTS_EXCHANGE = os.getenv("EVENTS_EXCHANGE", "pixquery.events")
+# Set to "false" to run without live updates; the UI then falls back to refetching
+# on its own. Nothing else changes — events are advisory.
+EVENTS_ENABLED = os.getenv("EVENTS_ENABLED", "true").lower() in ("1", "true", "yes")
 WEAVIATE_URL = os.getenv("WEAVIATE_URL", "http://localhost:8080")
 WATCH_ROOT = os.path.abspath(os.path.expanduser(os.getenv("WATCH_ROOT", "~/pixquery_photos")))
 # How often (seconds) the monitor re-reads workspace definitions from MongoDB

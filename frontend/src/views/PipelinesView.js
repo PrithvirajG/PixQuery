@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useLocation } from 'react-router-dom';
 import { errorMessage } from '../lib/apiError';
+import { API_BASE as API } from '../lib/apiBase';
 import {
   AP,
   STATUS,
@@ -20,8 +21,6 @@ import {
   ApSelect,
 } from '../aperture/kit';
 import PipelineGraphCanvas from '../components/PipelineGraphCanvas';
-
-const API = 'http://localhost:8000';
 
 const NODE_TYPES = [
   'object_detection',
@@ -312,7 +311,6 @@ function ModelManagementView() {
       description: p.description ?? '',
       nodes,
       edges,
-      extract_metadata: p.extract_metadata ?? false,
     });
     setDirty(false);
     setSelectedNodeId(nodes[0]?.node_id ?? null);
@@ -398,7 +396,6 @@ function ModelManagementView() {
       const res = await axios.post(`${API}/pipelines`, {
         name: `${p.name}-copy`,
         description: p.description ?? '',
-        extract_metadata: p.extract_metadata ?? false,
         nodes: copyNodes,
         edges: copyEdges,
       });
@@ -721,62 +718,6 @@ function ModelManagementView() {
                   {attachedWorkspaces.length > 0 &&
                     ` · attached to ${attachedWorkspaces.length} workspace${attachedWorkspaces.length === 1 ? '' : 's'}`}
                 </span>
-              </div>
-
-              {/* pipeline-wide settings (not a stage) */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                  marginBottom: 22,
-                  padding: '11px 14px',
-                  borderRadius: 11,
-                  background: AP.card,
-                  border: `1px solid ${AP.line2}`,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontFamily: AP.sans, fontSize: 13, fontWeight: 600, color: AP.ink }}>
-                    Extract EXIF &amp; GPS metadata
-                  </div>
-                  <div style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3, marginTop: 2 }}>
-                    Pipeline-wide · reads dimensions, camera &amp; GPS from the original file
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={!!editPipeline.extract_metadata}
-                  title="Toggle metadata extraction"
-                  onClick={() => mutate((ep) => ({ ...ep, extract_metadata: !ep.extract_metadata }))}
-                  style={{
-                    position: 'relative',
-                    width: 42,
-                    height: 24,
-                    borderRadius: 99,
-                    flex: '0 0 auto',
-                    cursor: 'pointer',
-                    padding: 0,
-                    background: editPipeline.extract_metadata ? AP.lumen : 'rgba(255,255,255,0.06)',
-                    border: `1px solid ${editPipeline.extract_metadata ? AP.lumenLine : AP.line2}`,
-                    transition: 'background .15s',
-                  }}
-                >
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: 2,
-                      left: editPipeline.extract_metadata ? 20 : 2,
-                      width: 18,
-                      height: 18,
-                      borderRadius: 99,
-                      background: '#fff',
-                      transition: 'left .15s',
-                    }}
-                  />
-                </button>
               </div>
 
               {/* add node + palette + wiring hint */}

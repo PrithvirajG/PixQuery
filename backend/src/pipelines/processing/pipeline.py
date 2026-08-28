@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.config import DEFAULT_PIPELINE_ID, DEFAULT_PIPELINE_VERSION
+from src.events import pipeline_stage_event
 from src.pipelines.ingestion.reconciler import sha256_file
 from src.pipelines.processing.executors.base import PermanentNodeError
 
@@ -170,9 +171,10 @@ class DynamicPipeline:
 
             image = self._image_loader(asset)
 
-            # EXIF/GPS metadata is a pipeline-wide setting, not a node: read it from
-            # the ORIGINAL file so the result is independent of any transform node.
-            self._maybe_extract_metadata(repository, job, asset, pipeline_run_id)
+            # EXIF/GPS metadata is always extracted (not a node, not a per-pipeline
+            # setting): read it from the ORIGINAL file so the result is independent
+            # of any transform node.
+            self._maybe_extract_metadata(repository, asset)
 
             final_context = self._run_graph(
                 repository, job, asset, image, pipeline_run_id
@@ -241,6 +243,19 @@ class DynamicPipeline:
             node.order = topo_index
             self._persist_outputs(repository, job, asset, pipeline_run_id, node, executor, updates)
             outputs[nid] = {**context, **updates}
+            # Announce progress *within* the run, so a watching UI can show
+            # "stage 3 of 5 · captioning" instead of one opaque "processing" span.
+            repository.emit_event(
+                pipeline_stage_event(
+                    workspace_id=asset.get("workspace_id"),
+                    asset_id=asset["_id"],
+                    pipeline_id=job.get("pipeline_id"),
+                    node_id=node.node_id,
+                    node_type=node.node_type,
+                    index=topo_index + 1,
+                    total=len(order),
+                )
+            )
 
         # Merge every node's outputs (topological order, last write wins) so the
         # embedding step sees embeddings/caption regardless of which node made them.
@@ -251,36 +266,22 @@ class DynamicPipeline:
                     final_context[key] = value
         return final_context
 
-    def _maybe_extract_metadata(self, repository, job, asset, pipeline_run_id) -> None:
-        """Persist EXIF/GPS/dimension metadata if the pipeline enables it.
+    def _maybe_extract_metadata(self, repository, asset) -> None:
+        """Extract EXIF/GPS/dimension metadata and persist it onto the asset itself.
 
-        Driven by ``PipelineDefinition.extract_metadata`` rather than a node, and
-        read from the original file on disk — so it captures true camera metadata
-        regardless of resize/grayscale nodes. Failures here never fail the job.
+        Always runs, for every job — not a node, not a per-pipeline setting — and
+        reads from the original file on disk, so it captures true camera metadata
+        regardless of resize/grayscale nodes. Stored on the asset (not
+        model_outputs): it's generic file info, not a pipeline output, so it isn't
+        scoped to a particular pipeline run. Failures here never fail the job.
         """
-        pipeline_id = job.get("pipeline_id")
-        definition = repository.get_pipeline(pipeline_id) if pipeline_id else None
-        if not definition or not definition.get("extract_metadata"):
-            return
         try:
             from src.pipelines.processing.executors.builtin import extract_image_metadata
 
             metadata = extract_image_metadata(asset["current_path"])
         except Exception:
             return  # metadata is best-effort; never block processing on it
-        repository.add_model_output(
-            asset_id=asset["_id"],
-            pipeline_run_id=pipeline_run_id,
-            model_name="exif",
-            model_version="pillow",
-            output_type="metadata",
-            payload={"metadata": metadata},
-            node_type="metadata",
-            order=-1,
-            workspace_id=asset.get("workspace_id"),
-            pipeline_id=pipeline_id,
-            pipeline_version=job.get("pipeline_version"),
-        )
+        repository.update_asset_metadata(asset["_id"], metadata)
 
     def _persist_outputs(self, repository, job, asset, pipeline_run_id, node, executor, updates):
         for key, value in updates.items():

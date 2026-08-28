@@ -190,44 +190,115 @@ export const IconBtn = ({ children, onClick, title, active = false }) => (
   </button>
 );
 
-// small ghost action button (Edit / Statistics / Retry rows)
-export const ActBtn = ({ children, onClick, accent = false, title, disabled }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    title={title}
-    disabled={disabled}
-    style={{
-      fontFamily: AP.sans,
-      fontSize: 12.5,
-      fontWeight: 600,
-      cursor: disabled ? 'not-allowed' : 'pointer',
-      whiteSpace: 'nowrap',
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '7px 13px',
-      borderRadius: 9,
-      transition: 'all .14s',
-      opacity: disabled ? 0.5 : 1,
-      color: accent ? AP.lumenSoft : AP.ink2,
-      background: accent ? AP.lumenBg : 'rgba(255,255,255,0.03)',
-      border: `1px solid ${accent ? AP.lumenLine : AP.line2}`,
-      flex: '0 0 auto',
-    }}
-    onMouseEnter={(e) => {
-      if (disabled) return;
-      e.currentTarget.style.background = accent ? AP.lumenBg2 : 'rgba(255,255,255,0.08)';
-      if (!accent) e.currentTarget.style.color = AP.ink;
-    }}
-    onMouseLeave={(e) => {
-      e.currentTarget.style.background = accent ? AP.lumenBg : 'rgba(255,255,255,0.03)';
-      if (!accent) e.currentTarget.style.color = AP.ink2;
-    }}
-  >
-    {children}
-  </button>
-);
+// small ghost action button (Edit / Statistics / Retry rows). `accent` gives
+// it the Lumen treatment for the one primary action in a row; `tone="danger"`
+// gives it the STATUS.err treatment for a destructive one (Delete) — danger
+// wins if both are set. `loading` swaps the button's whole content for a
+// spinning icon + `loadingLabel` and forces it disabled: pass a
+// present-progressive label ("Retrying…", "Deleting…") so the row reads as
+// in-progress rather than just inert. Hover/pressed are hand-rolled via
+// direct style mutation (Aperture has no CSS classes for interactive states)
+// and reset for free on every re-render since React reconciles `style` back
+// onto the node — so a `loading` flip mid-hover snaps to the right look
+// without any manual cleanup.
+export const ActBtn = ({
+  children,
+  onClick,
+  accent = false,
+  tone,
+  title,
+  disabled,
+  loading = false,
+  loadingLabel,
+}) => {
+  const danger = tone === 'danger';
+  const off = disabled || loading;
+  const palette = danger
+    ? { c: STATUS.err.c, bg: STATUS.err.bg, hoverBg: 'rgba(240,86,107,.24)', line: STATUS.err.line, hoverLine: 'rgba(240,86,107,.55)' }
+    : accent
+      ? { c: AP.lumenSoft, bg: AP.lumenBg, hoverBg: AP.lumenBg2, line: AP.lumenLine, hoverLine: AP.lumenLine }
+      : { c: AP.ink2, hoverC: AP.ink, bg: 'rgba(255,255,255,0.03)', hoverBg: 'rgba(255,255,255,0.08)', line: AP.line2, hoverLine: AP.line2 };
+  const pressed = {
+    bg: danger ? 'rgba(240,86,107,.24)' : accent ? 'rgba(124,108,247,0.3)' : 'rgba(255,255,255,0.13)',
+    line: danger ? 'rgba(240,86,107,.55)' : accent ? 'rgba(140,124,247,0.55)' : 'rgba(255,255,255,0.2)',
+    c: danger ? STATUS.err.c : accent ? AP.lumenSoft : AP.ink,
+  };
+
+  const setHover = (e) => {
+    e.currentTarget.style.background = palette.hoverBg;
+    e.currentTarget.style.borderColor = palette.hoverLine;
+    e.currentTarget.style.color = palette.hoverC || palette.c;
+    e.currentTarget.style.transform = 'none';
+    e.currentTarget.style.boxShadow = 'none';
+  };
+  const setRest = (e) => {
+    e.currentTarget.style.background = palette.bg;
+    e.currentTarget.style.borderColor = palette.line;
+    e.currentTarget.style.color = palette.c;
+    e.currentTarget.style.transform = 'none';
+    e.currentTarget.style.boxShadow = 'none';
+  };
+  const setPressed = (e) => {
+    e.currentTarget.style.background = pressed.bg;
+    e.currentTarget.style.borderColor = pressed.line;
+    e.currentTarget.style.color = pressed.c;
+    e.currentTarget.style.transform = 'translateY(1px)';
+    e.currentTarget.style.boxShadow = 'inset 0 1px 3px rgba(0,0,0,.4)';
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      disabled={off}
+      style={{
+        fontFamily: AP.sans,
+        fontSize: 12.5,
+        fontWeight: 600,
+        cursor: off ? 'not-allowed' : 'pointer',
+        whiteSpace: 'nowrap',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '7px 13px',
+        borderRadius: 9,
+        transition: 'all .14s',
+        opacity: loading ? 0.75 : disabled ? 0.5 : 1,
+        color: palette.c,
+        background: palette.bg,
+        border: `1px solid ${palette.line}`,
+        flex: '0 0 auto',
+      }}
+      onMouseEnter={(e) => !off && setHover(e)}
+      onMouseLeave={(e) => !off && setRest(e)}
+      onMouseDown={(e) => !off && setPressed(e)}
+      onMouseUp={(e) => !off && setHover(e)}
+    >
+      {loading ? (
+        <>
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="ap-spin"
+          >
+            <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+            <path d="M20 4v4.5h-4.5" />
+          </svg>
+          {loadingLabel}
+        </>
+      ) : (
+        children
+      )}
+    </button>
+  );
+};
 
 // pipeline on/off toggle switch
 export const Toggle = ({ on, onClick, title }) => (
@@ -502,6 +573,45 @@ export function Bar({ v = 0.5, c, h = 5, pulse = false, track = 'rgba(255,255,25
     </span>
   );
 }
+
+/* Loading placeholder for a value the backend is still computing.
+   Sized in the shape of the content it stands in for, so the layout doesn't jump
+   when the real thing arrives. */
+export const Shimmer = ({ w = '100%', h = 12, r = 6, style = {} }) => (
+  <span
+    className="ap-shimmer"
+    aria-hidden="true"
+    style={{ display: 'block', width: w, height: h, borderRadius: r, ...style }}
+  />
+);
+
+/* A card-shaped cluster of Shimmer lines, standing in for one pipeline output
+   while its pipeline is queued or running. */
+export const ShimmerCard = ({ lines = 3, label }) => (
+  <div
+    role="status"
+    aria-live="polite"
+    aria-label={label || 'Waiting for pipeline output'}
+    style={{
+      borderRadius: 9,
+      border: `1px solid ${AP.line2}`,
+      background: 'rgba(255,255,255,0.02)',
+      padding: '10px 11px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 9,
+    }}
+  >
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+      <Shimmer w={82} h={11} />
+      <Shimmer w={54} h={9} />
+    </div>
+    {Array.from({ length: lines }).map((_, i) => (
+      // Last line short, like a paragraph's final line — reads as text, not as bars.
+      <Shimmer key={i} w={i === lines - 1 ? '58%' : '100%'} h={10} />
+    ))}
+  </div>
+);
 
 // labeled stat
 export const StatBlock = ({ label, value, sub, accent = false }) => (

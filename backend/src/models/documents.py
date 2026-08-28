@@ -165,9 +165,5 @@ class PipelineDefinition(BaseDocument):
     owner_id: str
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     edges: list[dict[str, Any]] = Field(default_factory=list)
-    # Pipeline-wide setting (not a node): when true, EXIF/dimension metadata —
-    # including GPS — is read from the ORIGINAL file for every processed asset,
-    # independent of node order. See DynamicPipeline.run_job.
-    extract_metadata: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

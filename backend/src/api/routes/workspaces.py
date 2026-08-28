@@ -172,6 +172,25 @@ async def scan_workspace(
     return {"message": "Scan triggered", "workspace": workspace}
 
 
+@router.delete("/{workspace_id}/pipelines/{pipeline_id}/outputs")
+async def clear_pipeline_outputs(
+    workspace_id: str,
+    pipeline_id: str,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete every output this pipeline has produced in this workspace so far."""
+    try:
+        result = workspace_service.clear_pipeline_outputs(
+            workspace_id, pipeline_id, owner_id=current_user["_id"]
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return result
+
+
 # ──────────────────────────────────────────────────────────────
 # Membership
 # ──────────────────────────────────────────────────────────────

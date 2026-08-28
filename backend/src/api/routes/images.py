@@ -2,11 +2,23 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
-from src.api.dependencies import get_image_service, get_current_user
-from src.services import ImageService
+from src.api.dependencies import (
+    get_current_user,
+    get_image_service,
+    get_job_service,
+    get_workspace_service,
+)
+from src.services import ImageService, JobService, WorkspaceService
+from src.services.job_service import JobConflictError
+from src.services.workspace_service import WorkspaceAccessError
 
 router = APIRouter(prefix="/images", tags=["images"])
+
+
+class ReprocessRequest(BaseModel):
+    pipeline_id: str
 
 
 @router.get("")
@@ -56,3 +68,47 @@ async def get_image(
     if not asset:
         raise HTTPException(status_code=404, detail="Image not found")
     return asset
+
+
+@router.post("/{asset_id}/reprocess")
+async def reprocess_image(
+    asset_id: str,
+    body: ReprocessRequest,
+    job_service: JobService = Depends(get_job_service),
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually re-run one pipeline against this image, overriding its prior outputs."""
+    try:
+        job = await job_service.retrigger_pipeline(
+            asset_id, body.pipeline_id, user_id=current_user["_id"]
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except JobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not job:
+        raise HTTPException(status_code=404, detail="Image or pipeline not found")
+    return job
+
+
+@router.delete("/{asset_id}/outputs/{pipeline_id}")
+async def clear_image_pipeline_outputs(
+    asset_id: str,
+    pipeline_id: str,
+    workspace_service: WorkspaceService = Depends(get_workspace_service),
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete one pipeline's outputs for this image only.
+
+    The workspace-wide equivalent lives on the workspaces router; this is the
+    per-image control, and returns the pair to NOT_STARTED so it can be run again.
+    """
+    try:
+        result = workspace_service.clear_asset_pipeline_outputs(
+            asset_id, pipeline_id, owner_id=current_user["_id"]
+        )
+    except WorkspaceAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return result

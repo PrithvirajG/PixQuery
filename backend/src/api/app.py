@@ -9,7 +9,13 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.errors import register_error_handlers
 from src.api.router import api_router
-from src.config import MONGO_DB_NAME, MONGO_URI, RUN_MIGRATIONS_ON_STARTUP, WATCH_ROOT
+from src.config import (
+    EVENTS_ENABLED,
+    MONGO_DB_NAME,
+    MONGO_URI,
+    RUN_MIGRATIONS_ON_STARTUP,
+    WATCH_ROOT,
+)
 
 logger = logging.getLogger("pixquery.api")
 
@@ -40,15 +46,55 @@ def _run_startup_migrations() -> None:
         client.close()
 
 
+async def _start_event_bus() -> None:
+    """Let API-side mutations broadcast too.
+
+    Deleting outputs or hitting Reprocess changes state just as much as the worker
+    does; without this the acting tab would update while every other open tab sat
+    stale until its next refetch.
+    """
+    if not EVENTS_ENABLED:
+        return
+    from src.api.dependencies import get_pipeline_repository
+    from src.infrastructure.messaging import EventBus
+
+    try:
+        bus = await EventBus().start()
+    except Exception as exc:
+        logger.warning("Live events disabled in API: %s", exc)
+        return
+    _state["event_bus"] = bus
+    get_pipeline_repository().set_event_sink(bus.emit)
+
+
+async def _stop_event_bus() -> None:
+    from src.api.routes.websocket import reset_subscriber
+
+    bus = _state.pop("event_bus", None)
+    if bus:
+        await bus.close()
+    await reset_subscriber()
+
+
+# Process-wide handles that outlive a request but aren't per-request state.
+_state: dict = {}
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="PixQuery API")
 
     if RUN_MIGRATIONS_ON_STARTUP:
         app.add_event_handler("startup", _run_startup_migrations)
+    app.add_event_handler("startup", _start_event_bus)
+    app.add_event_handler("shutdown", _stop_event_bus)
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000"],
+        # LAN access: any private-network device hitting the dev server on :3000
+        # (e.g. http://192.168.1.4:3000). Kept as a regex (not "*") so it still
+        # works with allow_credentials=True, which the wildcard forbids.
+        allow_origin_regex=r"http://(192\.168|10\.\d{1,3}|172\.(1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}:3000",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

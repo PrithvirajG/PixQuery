@@ -2,8 +2,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from src.config import MONGO_DB_NAME, MONGO_URI
-from src.infrastructure.messaging import RabbitConsumer
+from src.config import EVENTS_ENABLED, MONGO_DB_NAME, MONGO_URI
+from src.infrastructure.messaging import EventBus, RabbitConsumer
 from src.infrastructure.vector_store import WeaviateEmbeddingStore
 from src.repositories import MongoPipelineRepository
 
@@ -22,6 +22,19 @@ class ImageProcessorConsumer(RabbitConsumer):
         self.repository = MongoPipelineRepository.from_uri(MONGO_URI, MONGO_DB_NAME)
         self.embedding_store = WeaviateEmbeddingStore()
         self.pipeline = DynamicPipeline(embedding_store=self.embedding_store)
+        self.event_bus: EventBus | None = None
+
+    async def connect(self):
+        await super().connect()
+        if not EVENTS_ENABLED:
+            return
+        # Runs pipelines in a worker thread, so the repository's event sink is
+        # called off-loop — EventBus.emit is thread-safe precisely for this.
+        try:
+            self.event_bus = await EventBus().start()
+            self.repository.set_event_sink(self.event_bus.emit)
+        except Exception as exc:
+            self.logger.warning("Live events disabled in worker: %s", exc)
 
     async def on_message(self, message):
         async with message.process(requeue=False):
@@ -60,4 +73,7 @@ class ImageProcessorConsumer(RabbitConsumer):
 
     async def close(self):
         await super().close()
+        if self.event_bus:
+            self.repository.set_event_sink(None)
+            await self.event_bus.close()
         self.embedding_store.close()

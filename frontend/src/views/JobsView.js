@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-
-const API = 'http://localhost:8000';
+import { API_BASE as API } from '../lib/apiBase';
 
 const STATUS_STYLES = {
   queued:     'text-slate-300 bg-slate-800/60 border-slate-700/50',

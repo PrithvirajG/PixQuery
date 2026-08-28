@@ -103,6 +103,49 @@ class WorkspaceService:
             )
         return self._serialize(workspace, owner_id)
 
+    def clear_pipeline_outputs(
+        self, workspace_id: str, pipeline_id: str, *, owner_id: str
+    ) -> dict[str, int] | None:
+        """Delete every output one pipeline has produced in this workspace so far.
+
+        Resets its jobs to 'queued' without dispatching them — a rescan only
+        redispatches 'failed' jobs, so getting outputs back requires a manual
+        per-image retrigger, not an accidental rescan.
+        """
+        workspace = self.repository.get_workspace(workspace_id)
+        if not workspace or not _can_view(role_for(workspace, owner_id)):
+            return None
+        if not _can_edit(role_for(workspace, owner_id)):
+            raise WorkspaceAccessError(
+                "Clearing pipeline outputs requires the editor or owner role"
+            )
+        return self.repository.clear_pipeline_outputs(workspace_id, pipeline_id)
+
+    def clear_asset_pipeline_outputs(
+        self, asset_id: str, pipeline_id: str, *, owner_id: str
+    ) -> dict[str, int] | None:
+        """Delete one pipeline's outputs for a single image.
+
+        Same authorization as the workspace-wide clear — it is the same
+        destructive act, just scoped to one image — resolved through the
+        workspace the asset belongs to.
+        """
+        asset = self.repository.get_asset(asset_id)
+        if not asset or not asset.get("active"):
+            return None
+        workspace = (
+            self.repository.get_workspace(asset["workspace_id"])
+            if asset.get("workspace_id")
+            else None
+        )
+        if not workspace or not _can_view(role_for(workspace, owner_id)):
+            return None
+        if not _can_edit(role_for(workspace, owner_id)):
+            raise WorkspaceAccessError(
+                "Clearing pipeline outputs requires the editor or owner role"
+            )
+        return self.repository.clear_asset_pipeline_outputs(asset_id, pipeline_id)
+
     # ──────────────────────────────────────────────────────────────
     # Membership
     # ──────────────────────────────────────────────────────────────

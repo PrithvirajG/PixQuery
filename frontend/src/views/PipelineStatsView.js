@@ -17,8 +17,7 @@ import {
   Bar,
   Counter,
 } from '../aperture/kit';
-
-const API = 'http://localhost:8000';
+import { API_BASE as API } from '../lib/apiBase';
 
 const LOG_COLOR = { queued: AP.ink3, processing: AP.lumenSoft, completed: STATUS.ok.c, failed: STATUS.err.c };
 
@@ -34,6 +33,8 @@ export default function PipelineStatsView() {
   const [jobs, setJobs] = useState([]);
   const [error, setError] = useState('');
   const [retrying, setRetrying] = useState({});
+  const [retryingAll, setRetryingAll] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -94,12 +95,37 @@ export default function PipelineStatsView() {
   };
 
   const retryAll = async () => {
-    for (const j of failed) {
-      // sequential to keep the API happy; no bulk-requeue endpoint yet
-      // eslint-disable-next-line no-await-in-loop
-      await axios.post(`${API}/jobs/${j._id}/requeue`).catch(() => {});
+    setRetryingAll(true);
+    try {
+      for (const j of failed) {
+        // sequential to keep the API happy; no bulk-requeue endpoint yet
+        // eslint-disable-next-line no-await-in-loop
+        await axios.post(`${API}/jobs/${j._id}/requeue`).catch(() => {});
+      }
+      await load();
+    } finally {
+      setRetryingAll(false);
     }
-    await load();
+  };
+
+  const clearOutputs = async () => {
+    if (
+      !window.confirm(
+        `Delete every output ${pipeline.name} has produced in ${ws.name}? This cannot be undone — ` +
+          `jobs stay marked completed, so a rescan won't regenerate them; use per-image "Re-run" to get them back.`
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await axios.delete(`${API}/workspaces/${workspaceId}/pipelines/${pipelineId}/outputs`);
+      await load();
+    } catch {
+      setError('Failed to clear outputs');
+    } finally {
+      setClearing(false);
+    }
   };
 
   if (!ws || !pipeline) {
@@ -153,6 +179,14 @@ export default function PipelineStatsView() {
         </GhostBtn>
         <GhostBtn onClick={() => navigate('/pipelines', { state: { selectPipeline: pipelineId } })}>
           ✎ Edit pipeline
+        </GhostBtn>
+        <GhostBtn
+          onClick={clearOutputs}
+          disabled={clearing || agg.total === 0}
+          title="Delete every output this pipeline has produced in this workspace"
+          style={{ color: STATUS.err.c, borderColor: STATUS.err.line }}
+        >
+          {clearing ? '⋯ Clearing' : '🗑 Clear outputs'}
         </GhostBtn>
       </div>
 
@@ -273,7 +307,11 @@ export default function PipelineStatsView() {
                 {failed.length} total{failed.length > 8 ? ' · showing 8' : ''}
               </span>
               <span style={{ flex: 1 }} />
-              {failed.length > 0 && <ActBtn onClick={retryAll}>⟳ Retry all failed</ActBtn>}
+              {failed.length > 0 && (
+                <ActBtn onClick={retryAll} loading={retryingAll} loadingLabel="Retrying all…">
+                  ⟳ Retry all failed
+                </ActBtn>
+              )}
             </div>
             {failed.length === 0 ? (
               <span style={{ fontFamily: AP.sans, fontSize: 12.5, color: AP.ink3 }}>No failures — all clear.</span>
@@ -321,8 +359,8 @@ export default function PipelineStatsView() {
                         {j.last_error?.message ?? j.last_error?.type ?? 'processing failed'}
                       </div>
                     </div>
-                    <ActBtn onClick={() => retryJob(j._id)} disabled={retrying[j._id]}>
-                      {retrying[j._id] ? '⟳ …' : '⟳ Retry'}
+                    <ActBtn onClick={() => retryJob(j._id)} loading={retrying[j._id]} loadingLabel="Retrying…">
+                      ⟳ Retry
                     </ActBtn>
                   </div>
                 ))}

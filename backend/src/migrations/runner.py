@@ -42,12 +42,33 @@ def _baseline(db: Any) -> None:
     MongoPipelineRepository(db)  # __init__ → ensure_indexes() + _seed_system_nodes()
 
 
+def _resync_system_nodes(db: Any) -> None:
+    """Refresh system nodes that were frozen at their original seed.
+
+    ``_seed_system_nodes`` used ``$setOnInsert`` for every field, so a node seeded
+    by an older build kept that build's schema forever. Face Detection was left
+    advertising ``min_confidence`` (a YOLO knob its executor never reads) and
+    declaring a ``faces`` output port while the executor emits ``detections`` —
+    so the pipeline editor showed a control that did nothing and hid the three
+    that work. Seeding now ``$set``s the code-owned fields, and constructing the
+    repository re-applies them to existing rows.
+    """
+    from src.repositories.mongo_pipeline import MongoPipelineRepository
+
+    MongoPipelineRepository(db)
+
+
 # Ordered list of all migrations. Append-only.
 MIGRATIONS: list[Migration] = [
     Migration(
         id="0001_baseline",
         description="Baseline: workspace-scoped indexes + seeded system pipeline nodes.",
         upgrade=_baseline,
+    ),
+    Migration(
+        id="0002_resync_system_nodes",
+        description="Re-apply code-owned fields to system pipeline nodes frozen at first seed.",
+        upgrade=_resync_system_nodes,
     ),
 ]
 

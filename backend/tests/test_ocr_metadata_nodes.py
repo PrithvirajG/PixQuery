@@ -13,8 +13,10 @@ from PIL import Image
 from src.pipelines.processing.executors import get_executor
 from src.pipelines.processing.executors.builtin import (
     _dms_to_decimal,
+    _exif_subifd_to_dict,
     _exif_to_dict,
     _gps_to_dict,
+    _to_number,
 )
 from src.pipelines.processing.pipeline import DynamicPipeline, _shape_output
 from src.repositories import InMemoryPipelineRepository
@@ -44,6 +46,40 @@ class ExifMappingTests(unittest.TestCase):
 
     def test_skips_empty_values(self):
         self.assertEqual(_exif_to_dict({271: "", 272: None}), {})
+
+
+class ExifSubIfdTests(unittest.TestCase):
+    """Shutter/aperture/ISO/focal length/lens live in the Exif SubIFD, not IFD0."""
+
+    def test_maps_camera_settings(self):
+        out = _exif_subifd_to_dict({
+            33434: 0.008,   # exposure_time (1/125s)
+            33437: 1.8,     # f_number
+            34855: 400,     # iso
+            37386: 5.6,     # focal_length
+            42036: " Wide Camera ",  # lens_model
+        })
+        self.assertAlmostEqual(out["exposure_time"], 0.008)
+        self.assertAlmostEqual(out["f_number"], 1.8)
+        self.assertEqual(out["iso"], 400)
+        self.assertAlmostEqual(out["focal_length"], 5.6)
+        self.assertEqual(out["lens_model"], "Wide Camera")  # stripped
+
+    def test_absent_and_empty_values_are_skipped(self):
+        self.assertEqual(_exif_subifd_to_dict({}), {})
+        self.assertEqual(_exif_subifd_to_dict({33437: None, 42036: ""}), {})
+
+    def test_unknown_tags_ignored(self):
+        self.assertEqual(_exif_subifd_to_dict({999999: "junk"}), {})
+
+    def test_to_number_coerces_rationals_and_passes_through_text(self):
+        class Rational:
+            """Stands in for PIL's IFDRational, which is float()-able."""
+            def __float__(self):
+                return 2.8
+
+        self.assertAlmostEqual(_to_number(Rational()), 2.8)
+        self.assertEqual(_to_number("not a number"), "not a number")
 
 
 class GpsExtractionTests(unittest.TestCase):
@@ -115,8 +151,8 @@ class OcrPersistenceAndSearchTests(unittest.TestCase):
         self.assertIn("ocr", results[0]["match_reason"]["fields"])
 
 
-class MetadataPipelineSettingTests(unittest.TestCase):
-    """EXIF extraction is a pipeline-wide setting, not a node."""
+class MetadataAlwaysExtractedTests(unittest.TestCase):
+    """EXIF extraction always runs and is stored on the asset, not as a pipeline output."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -137,12 +173,10 @@ class MetadataPipelineSettingTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, extract_metadata):
+    def _run(self):
         nodes = [{"node_id": "n0", "pipeline_node_id": self.noop["_id"],
                   "order": 0, "config_overrides": {}}]
-        pipeline_def = self.repo.create_pipeline(
-            owner_id="o", name="P", nodes=nodes, extract_metadata=extract_metadata,
-        )
+        pipeline_def = self.repo.create_pipeline(owner_id="o", name="P", nodes=nodes)
         job, _ = self.repo.ensure_processing_job(
             asset_id=self.asset["_id"], pipeline_id=pipeline_def["_id"], pipeline_version="v",
         )
@@ -158,17 +192,13 @@ class MetadataPipelineSettingTests(unittest.TestCase):
             get_executor=lambda nt: FakeNoop(),
             image_loader=lambda a: "IMG",
         ).run_job(self.repo, job["_id"])
-        return list(self.repo.model_outputs.find({"asset_id": self.asset["_id"]}))
 
-    def test_setting_on_writes_metadata_read_from_original_file(self):
-        outs = self._run(True)
-        self.assertEqual(len(outs), 1)
-        self.assertEqual(outs[0]["output_type"], "metadata")
-        self.assertEqual(outs[0]["payload"]["metadata"]["width"], 12)
-        self.assertEqual(outs[0]["payload"]["metadata"]["height"], 7)
-
-    def test_setting_off_writes_no_metadata(self):
-        self.assertEqual(self._run(False), [])
+    def test_metadata_written_to_asset_not_model_outputs(self):
+        self._run()
+        self.assertEqual(list(self.repo.model_outputs.find({"asset_id": self.asset["_id"]})), [])
+        asset = self.repo.get_asset(self.asset["_id"])
+        self.assertEqual(asset["metadata"]["width"], 12)
+        self.assertEqual(asset["metadata"]["height"], 7)
 
 
 if __name__ == "__main__":

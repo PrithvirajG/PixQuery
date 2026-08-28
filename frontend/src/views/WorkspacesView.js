@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { errorMessage } from '../lib/apiError';
+import { API_BASE as API } from '../lib/apiBase';
 import {
   AP,
   STATUS,
@@ -21,8 +22,6 @@ import {
   ApInput,
   ApSelect,
 } from '../aperture/kit';
-
-const API = 'http://localhost:8000';
 
 const EXTENSION_OPTIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.heic', '.avif'];
 
@@ -961,7 +960,7 @@ function WsCard({ workspace, pipelines, onOpen, onEdit, onDelete, onScan, onMemb
             </ActBtn>
           )}
           {canManage && (
-            <ActBtn onClick={() => onDelete(workspace._id)} title="Delete workspace">
+            <ActBtn tone="danger" onClick={() => onDelete(workspace._id)} title="Delete workspace">
               🗑
             </ActBtn>
           )}

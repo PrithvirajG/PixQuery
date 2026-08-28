@@ -31,9 +31,6 @@ class PipelineCreate(BaseModel):
     description: str = ""
     nodes: list[PipelineNodeRef] = []
     edges: list[PipelineEdgeRef] = []
-    # Pipeline-wide setting: extract EXIF/GPS/dimension metadata from the original
-    # file for every asset (not a node — always runs regardless of node order).
-    extract_metadata: bool = False
 
 
 class PipelineUpdate(BaseModel):
@@ -41,7 +38,6 @@ class PipelineUpdate(BaseModel):
     description: str | None = None
     nodes: list[PipelineNodeRef] | None = None
     edges: list[PipelineEdgeRef] | None = None
-    extract_metadata: bool | None = None
 
 
 @router.get("")
