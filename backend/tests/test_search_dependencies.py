@@ -158,7 +158,7 @@ class SemanticSearchTests(unittest.TestCase):
         store = StubVectorStore([VectorHit(asset_id=self.asset["_id"], certainty=0.9)])
         service = self._service(store, StubEncoder(None))
 
-        with self.assertLogs("pixquery.search", level=logging.INFO):
+        with self.assertLogs("pixquery.services.search_service", level=logging.INFO):
             results = service.search(
                 query="tabby", user_id=self.user["_id"], mode="semantic"
             )
@@ -171,7 +171,7 @@ class SemanticSearchTests(unittest.TestCase):
         store = StubVectorStore(error=ConnectionError("weaviate unreachable"))
         service = self._service(store, StubEncoder([0.1]))
 
-        with self.assertLogs("pixquery.search", level=logging.WARNING) as captured:
+        with self.assertLogs("pixquery.services.search_service", level=logging.WARNING) as captured:
             results = service.search(
                 query="tabby", user_id=self.user["_id"], mode="semantic"
             )

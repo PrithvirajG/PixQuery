@@ -22,12 +22,15 @@ from src.config import (
 )
 from src.domain_events import pipeline_state_event
 from src.infrastructure.messaging import EventSink
+from src.logging_config import get_logger
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.services.pipeline_versioning import pipeline_version_hash
 from src.utils.files import sha256_file, wait_for_stable_file
+
+logger = get_logger(__name__)
 
 
 class Publisher(Protocol):
@@ -165,12 +168,17 @@ class ReconciliationService:
                 pipeline_version=version,
                 workspace_id=self.workspace_id,
             )
-            # A brand-new job is already "queued" — tell the UI now so an image
-            # picked up by the monitor lights up without waiting for a poll.
             if created:
+                logger.debug(
+                    "New job created asset_id=%s pipeline_id=%s job_id=%s",
+                    asset["_id"], pipeline_id, job["_id"],
+                )
+                # A brand-new job is already "queued" — tell the UI now so an
+                # image picked up by the monitor lights up without waiting for a poll.
                 self._emit_state(job, "queued")
             dispatch = created
             if not created and redispatch_failed and job.get("status") in _REDISPATCH_STATUSES:
+                logger.info("Redispatching failed job job_id=%s asset_id=%s", job["_id"], asset["_id"])
                 job = self.jobs.requeue(job["_id"])
                 self._emit_state(job, "queued")
                 dispatch = True

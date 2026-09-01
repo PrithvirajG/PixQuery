@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
+from src.logging_config import get_logger
 
-_logger = logging.getLogger("pixquery.search")
+_logger = get_logger(__name__)
 
 
 class ClipQueryEncoder:

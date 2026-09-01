@@ -13,7 +13,6 @@ back into ``WorkspaceWatcher.reconcile_workspace`` below.
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -21,6 +20,7 @@ from watchdog.observers import Observer
 
 from src.errors.files import FileNotStableError
 from src.infrastructure.messaging import EventSink, RabbitPublisher
+from src.logging_config import get_logger, request_scope
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
@@ -28,11 +28,7 @@ from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.reconciliation_service import ReconciliationService
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("FilesystemMonitor")
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -65,12 +61,15 @@ class ImageEventHandler(FileSystemEventHandler):
         asyncio.run_coroutine_threadsafe(self._observe(path), self.loop)
 
     async def _observe(self, path: Path):
-        try:
-            await self.reconciler.observe_file(path)
-        except FileNotStableError:
-            logger.info("Postponing unstable file: %s", path)
-        except Exception:
-            logger.exception("Failed to observe %s", path)
+        # Not triggered by any inbound request — bind a fresh id so this
+        # file's ingest-through-processing chain is still traceable as one unit.
+        with request_scope():
+            try:
+                await self.reconciler.observe_file(path)
+            except FileNotStableError:
+                logger.info("Postponing unstable file: %s", path)
+            except Exception:
+                logger.exception("Failed to observe %s", path)
 
 
 # ---------------------------------------------------------------------------
@@ -170,26 +169,29 @@ class WorkspaceWatcher:
     # ------------------------------------------------------------------
     async def sync(self) -> None:
         """Reconcile running observers with what's in the database."""
-        active_workspaces = self.workspaces.list_all_active()
-        active_ids = {ws["_id"] for ws in active_workspaces}
+        # One id for this whole sync pass — not triggered by any inbound
+        # request, so it's the only thing tying its log lines together.
+        with request_scope():
+            active_workspaces = self.workspaces.list_all_active()
+            active_ids = {ws["_id"] for ws in active_workspaces}
 
-        # Stop removed / deactivated workspaces
-        for ws_id in list(self._watchers):
-            if ws_id not in active_ids:
-                self._stop_one(ws_id)
+            # Stop removed / deactivated workspaces
+            for ws_id in list(self._watchers):
+                if ws_id not in active_ids:
+                    self._stop_one(ws_id)
 
-        # Restart workspaces whose definition changed (path, pipelines, extensions)
-        for ws in active_workspaces:
-            ws_id = ws["_id"]
-            if ws_id in self._watchers and self._signatures.get(ws_id) != self._signature(ws):
-                logger.info("Workspace '%s' definition changed — rebuilding watcher", ws.get("name"))
-                self._stop_one(ws_id)
+            # Restart workspaces whose definition changed (path, pipelines, extensions)
+            for ws in active_workspaces:
+                ws_id = ws["_id"]
+                if ws_id in self._watchers and self._signatures.get(ws_id) != self._signature(ws):
+                    logger.info("Workspace '%s' definition changed — rebuilding watcher", ws.get("name"))
+                    self._stop_one(ws_id)
 
-        # Start newly added workspaces + run initial reconcile
-        for ws in active_workspaces:
-            if ws["_id"] not in self._watchers:
-                self._start_one(ws)
-                await self.reconcile_workspace(ws["_id"])
+            # Start newly added workspaces + run initial reconcile
+            for ws in active_workspaces:
+                if ws["_id"] not in self._watchers:
+                    self._start_one(ws)
+                    await self.reconcile_workspace(ws["_id"])
 
     async def reconcile_workspace(self, workspace_id: str, *, redispatch_failed: bool = False) -> int:
         """Run an immediate full reconcile for one workspace.
@@ -220,8 +222,10 @@ class WorkspaceWatcher:
 
     async def reconcile_all(self) -> None:
         # Periodic, unattended refresh — never retries a failed job on its own.
-        for ws_id in list(self._watchers):
-            await self.reconcile_workspace(ws_id)
+        # One id for the whole pass, same reasoning as sync().
+        with request_scope():
+            for ws_id in list(self._watchers):
+                await self.reconcile_workspace(ws_id)
 
     def stop_all(self) -> None:
         for ws_id in list(self._watchers):

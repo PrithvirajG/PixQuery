@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 
 from src.config import EVENTS_ENABLED, MONGO_DB_NAME, MONGO_URI, WORKSPACE_REFRESH_INTERVAL
-from src.consumer.ingestion.filesystem_watcher import WorkspaceWatcher, logger
+from src.consumer.ingestion.filesystem_watcher import WorkspaceWatcher
 from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
 from src.infrastructure.messaging import EventSink, RabbitPublisher
+from src.logging_config import get_logger
 from src.publisher.events import EventPublisher
 from src.repositories.bootstrap import ensure_schema
 from src.repositories.file_observations_repository import FileObservationsRepository
@@ -20,6 +21,8 @@ from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
+
+logger = get_logger(__name__)
 
 
 async def start_file_watcher() -> None:

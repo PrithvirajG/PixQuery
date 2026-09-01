@@ -41,3 +41,23 @@ WATCH_ROOT = os.path.abspath(os.path.expanduser(os.getenv("WATCH_ROOT", "~/pixqu
 # How often (seconds) the monitor re-reads workspace definitions from MongoDB
 WORKSPACE_REFRESH_INTERVAL = int(os.getenv("WORKSPACE_REFRESH_INTERVAL", "60"))
 
+# ---------------------------------------------------------------------------
+# Logging — see src/logging_config.py for the setup this feeds.
+# ---------------------------------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FORMAT = os.getenv(
+    "LOG_FORMAT", "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s"
+)
+LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", "%Y-%m-%d %H:%M:%S")
+# Console only — a color-coded level name. Auto-skipped on a non-TTY stream
+# (redirected to a file, most container log drivers) regardless of this flag.
+LOG_COLOR = os.getenv("LOG_COLOR", "true").lower() in ("1", "true", "yes")
+LOG_TO_FILE = os.getenv("LOG_TO_FILE", "true").lower() in ("1", "true", "yes")
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+# Rollover cap: a new file starts once the current one reaches this size.
+LOG_FILE_MAX_BYTES = int(os.getenv("LOG_FILE_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+LOG_FILE_BACKUP_COUNT = int(os.getenv("LOG_FILE_BACKUP_COUNT", "5"))
+# Per-logger level overrides, applied on top of LOG_LEVEL — e.g.
+# "pixquery.repositories=WARNING,pixquery.services.search_service=DEBUG".
+LOG_LEVELS = os.getenv("LOG_LEVELS", "")
+

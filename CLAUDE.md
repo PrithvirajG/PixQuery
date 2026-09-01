@@ -79,6 +79,7 @@ file_watcher_main.py  →  RabbitMQ (image_task queue)  →  pipeline_worker_mai
 | `publisher/` | Every named RabbitMQ publisher in the codebase — the mirror image of `consumer/`, same reasoning (one place to find "every publisher," each subclasses `RabbitPublisher`). Just `events/` today. |
 | `publisher/events/` | `event_publisher.py`'s `EventPublisher(RabbitPublisher)` — the publish half of the live-events fanout; see `infrastructure/messaging/`'s row and `consumer/events/`'s row for the consume-side mirror. Constructed and `connect()`-ed directly in each of the three processes (`api/app.py::_start_event_bus`, `consumer/processing/image_task_consumer.py`, `consumer/ingestion/worker.py`), then wired into that process's `EventSink` |
 | `config.py` | All env-var defaults in one place |
+| `logging_config.py` | Central logging setup — `get_logger(__name__)` (every logger in the codebase goes through this, never `logging.getLogger` directly), `configure_logging(process_name=...)` (called once per process entry point), and the request-tracing contextvar (`bind_request_id`/`request_scope`/`get_request_id`) — see the Logging section below |
 
 ### Key data flow
 
@@ -122,6 +123,36 @@ Design system: **Aperture** (`aperture/tokens.js` — `AP` color/type tokens, `S
 - **Domain events are emitted by services, not repositories.** `infrastructure/messaging/EventSink` is a mutable box a service holds a reference to; each process arms it with a real `EventPublisher` once its event loop exists (`api/app.py`'s `_start_event_bus`, `consumer/processing/image_task_consumer.py`, `consumer/ingestion/worker.py`) and every mutating service method that matters to the UI (job state transitions, per-stage progress, outputs cleared) calls `self.event_sink.emit(...)` explicitly at the point of change.
 - **External capabilities are injected, not imported mid-method.** `SearchService` takes `vector_store: VectorSearchClient` and `query_encoder: QueryEncoder` (both defaulting lazily to the Weaviate/CLIP adapters), so ranking and fusion are testable without infrastructure — see `tests/test_search_dependencies.py`. Follow the same pattern for new outbound dependencies.
 - **`workspace_id` from a request is a filter, never a widening.** It arrives unvalidated on `/search`, so `SearchService._allowed_asset_ids` intersects the workspace's assets with the caller's own accessible set. Any new workspace-scoped query must intersect the same way rather than substituting the workspace scope for the user scope.
-- Degrading gracefully still means logging: the `pixquery.search` logger records why semantic search fell back (unencodable query vs. vector-store fault) so a misconfigured Weaviate doesn't look like a missing CLIP install.
+- Degrading gracefully still means logging: `search_service.py`'s logger records why semantic search fell back (unencodable query vs. vector-store fault) so a misconfigured Weaviate doesn't look like a missing CLIP install.
 - **DB documents are Pydantic models** in `src/models/documents.py`. Build new documents via `Model(...).to_doc()` (never hand-assemble dicts); add a field by editing the model, not the repo's insert site.
 - **Schema changes go through a migration.** Append a `Migration("000N_…", …, upgrade)` to `MIGRATIONS` in `src/migrations/runner.py` (append-only; never edit a released one); apply with `python -m src.migrations`. The API auto-runs pending migrations on startup unless `RUN_MIGRATIONS_ON_STARTUP=false`.
+
+## Logging
+
+Every logger in the backend is created via `src/logging_config.py`'s `get_logger(__name__)` — never `logging.getLogger` directly, and never a scattered `logging.basicConfig()` (there used to be nine of those; all gone). `get_logger` maps the caller's module path onto a `pixquery.*` namespace (`src.services.image_service` → `pixquery.services.image_service`), so the logger hierarchy mirrors the package layout and every layer — router, service, repository, a whole package — can be leveled independently.
+
+`configure_logging(process_name=...)` is called exactly once, at the top of each of the four entry points (`api_main.py`, `pipeline_worker_main.py`, `file_watcher_main.py`, `src/migrations/__main__.py`), before any other import can log. It installs two handlers on the `pixquery` root logger: a colorized console handler (ANSI, auto-skipped on a non-TTY stream) and a `RotatingFileHandler` writing to `LOG_DIR/{process_name}.log`.
+
+Env vars (all read once, in `config.py`):
+
+| Var | Default | Purpose |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | Root level for the whole `pixquery` tree |
+| `LOG_LEVELS` | *(empty)* | Per-logger overrides, applied on top of `LOG_LEVEL` — `"pixquery.repositories=WARNING,pixquery.services.search_service=DEBUG"` |
+| `LOG_FORMAT` | includes timestamp, level, `[request_id]`, logger name, message | Shared by console + file |
+| `LOG_COLOR` | `true` | Console only; ignored on redirected/non-TTY output |
+| `LOG_TO_FILE` | `true` | Toggle the rotating file handler off entirely |
+| `LOG_DIR` | `logs` | Where `{process_name}.log` and its rotated backups land |
+| `LOG_FILE_MAX_BYTES` | `10485760` (10 MB) | Rollover cap per file |
+| `LOG_FILE_BACKUP_COUNT` | `5` | Rotated files kept alongside the current one |
+
+**Request tracing.** A short id (`logging_config.py`'s `request_id` contextvar) rides every log line — `%(request_id)s` in the default format — and every RabbitMQ message published via `RabbitPublisher.publish()`, as the AMQP `correlation_id`, defaulting to whatever id is currently bound. That's what makes one user action traceable across process boundaries without threading an id through every call site by hand:
+
+1. `api/app.py`'s HTTP middleware binds one id per request (`X-Request-ID` header if the caller sent one, else a fresh one) and echoes it back on the response.
+2. A route that publishes onto RabbitMQ (e.g. `workspaces.py`'s `/scan` → `scan_commands`) doesn't pass a `correlation_id` explicitly — `RabbitPublisher.publish()` reads the ambient one.
+3. The receiving consumer's `on_message` rebinds it from `message.correlation_id` via `with request_scope(message.correlation_id):` before doing any work — see `ScanCommandConsumer`, `ImageProcessorConsumer`.
+4. Anything that publishes further downstream (e.g. `ReconciliationService` dispatching onto `image_task`) inherits the same ambient id automatically, so it survives another hop.
+
+A trigger chain with no inbound request (a filesystem-detected file change, the periodic reconcile loop) binds a **fresh** id of its own at the outermost point (`ImageEventHandler._observe`, `WorkspaceWatcher.sync`/`reconcile_all`) — see `request_scope()` — so its own log lines are still traceable as one unit, just not tied to any HTTP request.
+
+**What gets logged.** Deliberately not "everything" — routine reads are silent; mutating/destructive operations and their errors are not. `PipelineExecutionService.run_job` logs job start/complete/fail/retry at INFO/WARNING (per-node execution is DEBUG, off by default); `WorkspaceService`/`PipelineService` log create/delete/cascade-delete and membership changes; `auth.py` logs registration and failed logins. Follow that weighting for new code: log state transitions and failures, not every read.

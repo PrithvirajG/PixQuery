@@ -1,11 +1,11 @@
 import asyncio
-import logging
 from datetime import datetime, timezone
 
 from src.config import EVENTS_ENABLED, MONGO_DB_NAME, MONGO_URI
 from src.infrastructure.messaging import EventSink, RabbitConsumer
 from src.publisher.events import EventPublisher
 from src.infrastructure.vector_store import WeaviateEmbeddingStore
+from src.logging_config import get_logger, request_scope
 from src.repositories.bootstrap import ensure_schema
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.model_outputs_repository import ModelOutputsRepository
@@ -15,17 +15,12 @@ from src.repositories.pipeline_runs_repository import PipelineRunsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.services.pipeline_execution_service import PipelineExecutionService
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-
 
 class ImageProcessorConsumer(RabbitConsumer):
     def __init__(self):
         super().__init__()
 
-        self.logger = logging.getLogger("ImageProcessorConsumer")
+        self.logger = get_logger(__name__)
         # One live connection, shared by every repository below — bootstrapped
         # once here (index creation, system-node seeding), same as api/dependencies.py.
         from pymongo import MongoClient
@@ -64,16 +59,19 @@ class ImageProcessorConsumer(RabbitConsumer):
     async def on_message(self, message):
         async with message.process(requeue=False):
             job_id = message.body.decode().strip()
-            self.logger.info("Processing job_id=%s", job_id)
-            try:
-                await asyncio.to_thread(self.pipeline.run_job, job_id)
-            except Exception:
-                self.logger.exception("Failed job_id=%s", job_id)
-                job = self.jobs.get(job_id)
-                if job and job.get("status") == "queued":
-                    asyncio.create_task(self._republish_after_backoff(job_id, job.get("next_attempt_at")))
-                return
-            self.logger.info("Finished job_id=%s", job_id)
+            with request_scope(message.correlation_id):
+                self.logger.info("Processing job_id=%s", job_id)
+                try:
+                    await asyncio.to_thread(self.pipeline.run_job, job_id)
+                except Exception:
+                    self.logger.exception("Failed job_id=%s", job_id)
+                    job = self.jobs.get(job_id)
+                    if job and job.get("status") == "queued":
+                        asyncio.create_task(
+                            self._republish_after_backoff(job_id, job.get("next_attempt_at"))
+                        )
+                    return
+                self.logger.info("Finished job_id=%s", job_id)
 
     async def _republish_after_backoff(self, job_id: str, next_attempt_at):
         delay = 0

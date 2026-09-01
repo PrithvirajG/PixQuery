@@ -5,6 +5,7 @@ from typing import Any
 from src.domain_events import outputs_cleared_event
 from src.errors.workspaces import WorkspaceAccessError, WorkspaceValidationError
 from src.infrastructure.messaging import EventSink
+from src.logging_config import get_logger
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.model_outputs_repository import ModelOutputsRepository
@@ -14,6 +15,8 @@ from src.repositories.users_repository import UsersRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
 
+
+logger = get_logger(__name__)
 
 # Assignable member roles (the owner has the implicit "owner" role via owner_id).
 ASSIGNABLE_ROLES = {"viewer", "editor"}
@@ -87,6 +90,7 @@ class WorkspaceService:
             extensions=data.get("extensions", [".jpg", ".jpeg", ".png", ".webp"]),
             active=data.get("active", True),
         )
+        logger.info("Workspace created id=%s owner_id=%s name=%r", workspace["_id"], owner_id, data["name"])
         return self._serialize(workspace, owner_id)
 
     def update_workspace(
@@ -128,7 +132,12 @@ class WorkspaceService:
             self.runs.delete_for_asset(asset_id)
             self.assets.delete(asset_id)
 
-        return self.workspaces.delete(workspace_id)
+        deleted = self.workspaces.delete(workspace_id)
+        logger.info(
+            "Workspace deleted id=%s owner_id=%s orphaned_assets=%d",
+            workspace_id, owner_id, len(asset_ids),
+        )
+        return deleted
 
     def trigger_scan(self, workspace_id: str, *, owner_id: str) -> dict[str, Any] | None:
         """Return workspace info; actual reconciliation is handled by the watcher process."""
@@ -169,6 +178,10 @@ class WorkspaceService:
             "runs_deleted": runs_deleted,
             "jobs_deleted": jobs_deleted,
         }
+        logger.info(
+            "Pipeline outputs cleared workspace_id=%s pipeline_id=%s %s",
+            workspace_id, pipeline_id, counts,
+        )
         if self.event_sink is not None:
             self.event_sink.emit(
                 outputs_cleared_event(
@@ -219,6 +232,10 @@ class WorkspaceService:
             "runs_deleted": runs_deleted,
             "jobs_deleted": jobs_deleted,
         }
+        logger.info(
+            "Pipeline outputs cleared asset_id=%s pipeline_id=%s %s",
+            asset_id, pipeline_id, counts,
+        )
         if self.event_sink is not None:
             self.event_sink.emit(
                 outputs_cleared_event(
@@ -279,6 +296,10 @@ class WorkspaceService:
         updated = self.workspaces.add_member(workspace_id, user["_id"], role)
         if updated is None:  # workspace removed between the access check and the write
             return None
+        logger.info(
+            "Member added workspace_id=%s username=%r role=%s by actor_id=%s",
+            workspace_id, username, role, actor_id,
+        )
         return self._member_view(updated)
 
     def update_member_role(
@@ -292,6 +313,10 @@ class WorkspaceService:
         updated = self.workspaces.set_member_role(workspace_id, member_id, role)
         if updated is None:
             raise ValueError("That user is not a member of this workspace")
+        logger.info(
+            "Member role changed workspace_id=%s member_id=%s role=%s by actor_id=%s",
+            workspace_id, member_id, role, actor_id,
+        )
         return self._member_view(updated)
 
     def remove_member(
@@ -303,6 +328,10 @@ class WorkspaceService:
         updated = self.workspaces.remove_member(workspace_id, member_id)
         if updated is None:  # workspace removed between the access check and the write
             return None
+        logger.info(
+            "Member removed workspace_id=%s member_id=%s by actor_id=%s",
+            workspace_id, member_id, actor_id,
+        )
         return self._member_view(updated)
 
     def search_users_for_workspace(

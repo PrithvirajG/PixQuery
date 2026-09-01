@@ -1,5 +1,9 @@
 import asyncio
 
+from src.logging_config import configure_logging
+
+configure_logging(process_name="pipeline-worker")
+
 from src.consumer.processing import start_pipeline_worker
 
 

@@ -8,16 +8,10 @@ user asking to re-check the workspace wants — see
 
 from __future__ import annotations
 
-import logging
-
 from src.config import RABBITMQ_URL, SCAN_COMMAND_QUEUE
 from src.consumer.ingestion.filesystem_watcher import WorkspaceWatcher
 from src.infrastructure.messaging import RabbitConsumer
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from src.logging_config import get_logger, request_scope
 
 
 class ScanCommandConsumer(RabbitConsumer):
@@ -31,11 +25,12 @@ class ScanCommandConsumer(RabbitConsumer):
         rabbitmq_url: str = RABBITMQ_URL,
     ):
         super().__init__(queue_name=queue_name, rabbitmq_url=rabbitmq_url)
-        self.logger = logging.getLogger("ScanCommandConsumer")
+        self.logger = get_logger(__name__)
         self.watcher = watcher
 
     async def on_message(self, message):
         async with message.process():
             workspace_id = message.body.decode().strip()
-            self.logger.info("Received scan command for workspace %s", workspace_id)
-            await self.watcher.reconcile_workspace(workspace_id, redispatch_failed=True)
+            with request_scope(message.correlation_id):
+                self.logger.info("Received scan command for workspace %s", workspace_id)
+                await self.watcher.reconcile_workspace(workspace_id, redispatch_failed=True)

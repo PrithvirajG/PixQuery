@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 
 from src.config import EVENTS_EXCHANGE, RABBITMQ_URL
 from src.domain_events import Event
 from src.infrastructure.messaging.rabbitmq_connection import _connect_with_retry
 from src.infrastructure.messaging.rabbitmq_publisher import RabbitPublisher
+from src.logging_config import get_logger
 
-_logger = logging.getLogger("pixquery.events")
+_logger = get_logger(__name__)
 
 # Bound so a wedged publish loop or a broker outage costs bounded memory
 # instead of growing until the process dies.

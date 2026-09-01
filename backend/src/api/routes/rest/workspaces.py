@@ -5,11 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.dependencies import get_current_user, get_workspace_service
-from src.config import RABBITMQ_URL, SCAN_COMMAND_QUEUE
+from src.config import SCAN_COMMAND_QUEUE
 from src.errors.workspaces import WorkspaceAccessError, WorkspaceValidationError
+from src.infrastructure.messaging import RabbitPublisher
+from src.logging_config import get_logger
 from src.services import WorkspaceService
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+logger = get_logger(__name__)
 
 
 @router.get("/browse")
@@ -151,23 +154,21 @@ async def scan_workspace(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Publish a scan command so the monitor process triggers an immediate reconcile
+    # Publish a scan command so the file-watcher triggers an immediate reconcile.
+    # correlation_id defaults to this request's bound trace id (RabbitPublisher.publish),
+    # so the file-watcher's ScanCommandConsumer and the pipeline-worker jobs it
+    # dispatches all log under the same id as this request.
     try:
-        import aio_pika
-        connection = await aio_pika.connect_robust(RABBITMQ_URL)
-        async with connection:
-            channel = await connection.channel()
-            await channel.declare_queue(SCAN_COMMAND_QUEUE, durable=True)
-            await channel.default_exchange.publish(
-                aio_pika.Message(
-                    body=workspace_id.encode(),
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-                routing_key=SCAN_COMMAND_QUEUE,
-            )
+        publisher = RabbitPublisher(queue_name=SCAN_COMMAND_QUEUE)
+        await publisher.connect()
+        try:
+            await publisher.publish(workspace_id)
+        finally:
+            await publisher.close()
+        logger.info("Scan command published workspace_id=%s", workspace_id)
     except Exception:
-        # Scan command is best-effort; the monitor will pick it up on next interval anyway
-        pass
+        # Best-effort; the file-watcher's periodic refresh will pick it up anyway.
+        logger.warning("Could not publish scan command for workspace_id=%s", workspace_id, exc_info=True)
 
     return {"message": "Scan triggered", "workspace": workspace}
 

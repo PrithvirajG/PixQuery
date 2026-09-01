@@ -1,3 +1,7 @@
+from src.logging_config import configure_logging
+
+configure_logging(process_name="api")
+
 from src.api import create_app
 
 app = create_app()

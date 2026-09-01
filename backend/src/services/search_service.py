@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Literal
 
 from src.infrastructure.vector_store.protocol import QueryEncoder, VectorSearchClient
+from src.logging_config import get_logger
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.model_outputs_repository import ModelOutputsRepository
@@ -14,7 +14,7 @@ from src.services.document_serializer import serialize_document
 
 SearchMode = Literal["semantic", "keyword", "hybrid"]
 
-_logger = logging.getLogger("pixquery.search")
+_logger = get_logger(__name__)
 
 # Weaviate class holding caption/OCR text vectors — what a text query searches.
 TEXT_EMBEDDING_CLASS = "TextEmbedding"

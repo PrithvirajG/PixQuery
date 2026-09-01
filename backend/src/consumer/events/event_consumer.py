@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from typing import Iterator
 
 from src.config import EVENTS_EXCHANGE, RABBITMQ_URL
 from src.domain_events import Event
 from src.infrastructure.messaging.rabbitmq_connection import _connect_with_retry
 from src.infrastructure.messaging.rabbitmq_consumer import RabbitConsumer
+from src.logging_config import get_logger
 
 # Bound so a wedged listener costs bounded memory instead of growing until the
 # process dies.
@@ -46,7 +46,7 @@ class EventConsumer(RabbitConsumer):
 
     def __init__(self, url: str = RABBITMQ_URL, exchange_name: str = EVENTS_EXCHANGE):
         super().__init__(queue_name=exchange_name, rabbitmq_url=url)
-        self.logger = logging.getLogger("EventConsumer")
+        self.logger = get_logger(__name__)
         self.exchange_name = exchange_name
         self._listeners: set[asyncio.Queue] = set()
 

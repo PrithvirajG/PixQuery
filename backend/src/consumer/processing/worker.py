@@ -1,6 +1,9 @@
 import asyncio
 
 from src.consumer.processing import ImageProcessorConsumer
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 async def start_pipeline_worker():
@@ -12,6 +15,6 @@ async def start_pipeline_worker():
         while True:
             await asyncio.sleep(3600)
     except KeyboardInterrupt:
-        print("Shutting down consumer...")
+        logger.info("Shutting down consumer...")
     finally:
         await consumer.close()

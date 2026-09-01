@@ -1,14 +1,13 @@
-import logging
-
 from src.config import RABBITMQ_QUEUE, RABBITMQ_URL
 from src.infrastructure.messaging.rabbitmq_connection import _connect_with_retry
+from src.logging_config import get_logger
 
 
 class RabbitConsumer:
     def __init__(self, queue_name=RABBITMQ_QUEUE, rabbitmq_url=RABBITMQ_URL):
         self.queue_name = queue_name
         self.rabbitmq_url = rabbitmq_url
-        self.logger = logging.getLogger("RabbitConsumer")
+        self.logger = get_logger(__name__)
         self.logger.info("Initializing RabbitMQ consumer for queue: %s", self.queue_name)
 
     async def connect(self):

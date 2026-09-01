@@ -11,12 +11,12 @@ leaving it disconnected — tests, migrations, one-shot scripts) is just
 
 from __future__ import annotations
 
-import logging
 from typing import Callable
 
 from src.domain_events import Event
+from src.logging_config import get_logger
 
-_logger = logging.getLogger("pixquery.events")
+_logger = get_logger(__name__)
 
 
 class EventSink:

@@ -1,17 +1,12 @@
 """Shared AMQP connection helper for every publisher and consumer in ``messaging/``."""
 
 import asyncio
-import logging
 import time
 
 from src.config import RABBITMQ_CONNECT_TIMEOUT
+from src.logging_config import get_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-
-_logger = logging.getLogger("RabbitMQ")
+_logger = get_logger(__name__)
 
 
 async def _connect_with_retry(rabbitmq_url, timeout=RABBITMQ_CONNECT_TIMEOUT):

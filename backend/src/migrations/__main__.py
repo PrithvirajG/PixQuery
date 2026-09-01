@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 
 from src.config import MONGO_DB_NAME, MONGO_URI
+from src.logging_config import configure_logging
 from src.migrations import MIGRATIONS, applied_migration_ids, run_migrations
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    configure_logging(process_name="migrations")
     argv = argv if argv is not None else sys.argv[1:]
 
     from pymongo import MongoClient

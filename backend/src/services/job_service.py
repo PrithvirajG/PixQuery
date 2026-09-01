@@ -1,5 +1,6 @@
 from src.errors.jobs import JobConflictError
 from src.errors.workspaces import WorkspaceAccessError
+from src.logging_config import get_logger
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
@@ -7,6 +8,8 @@ from src.repositories.workspace_definitions_repository import WorkspaceDefinitio
 from src.services.document_serializer import serialize_document, serialize_documents
 from src.services.pipeline_versioning import pipeline_version_hash
 from src.services.workspace_service import role_for
+
+logger = get_logger(__name__)
 
 
 class JobService:
@@ -39,6 +42,7 @@ class JobService:
             await publisher.publish(job_id)
         finally:
             await publisher.close()
+        logger.info("Job requeued job_id=%s asset_id=%s", job_id, job.get("asset_id"))
         return serialize_document(job)
 
     async def retrigger_pipeline(self, asset_id: str, pipeline_id: str, *, user_id: str):
@@ -79,4 +83,8 @@ class JobService:
             raise JobConflictError(
                 f"This pipeline is already {job['status']} for this image"
             )
+        logger.info(
+            "Pipeline retriggered asset_id=%s pipeline_id=%s by user_id=%s",
+            asset_id, pipeline_id, user_id,
+        )
         return await self.requeue_job(job["_id"])

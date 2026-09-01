@@ -2,17 +2,12 @@ from ultralytics import YOLO
 
 from PIL import Image, ImageDraw, ImageFont
 from .interface import ModelInterface
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from src.logging_config import get_logger
 
 
 class YoloModel(ModelInterface):
     def __init__(self, model_path='yolov8n.pt'):
-        self.logger = logging.getLogger("YoloModel")
+        self.logger = get_logger(__name__)
         self.model = YOLO(model_path)
         self.logger.info("YOLO model loaded from %s", model_path)
 

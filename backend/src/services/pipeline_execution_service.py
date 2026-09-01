@@ -11,6 +11,7 @@ from src.domain_events import pipeline_stage_event, pipeline_state_event
 from src.errors.executors import PermanentNodeError
 from src.errors.graph import GraphCycleError, UnknownNodeError
 from src.infrastructure.messaging import EventSink
+from src.logging_config import get_logger
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.model_outputs_repository import ModelOutputsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
@@ -21,6 +22,8 @@ from src.utils.files import sha256_file
 from src.utils.graph import topological_order
 from src.utils.time import utcnow
 from src.utils.vectors import normalize
+
+logger = get_logger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,10 +188,15 @@ class PipelineExecutionService:
 
     def run_job(self, job_id: str) -> None:
         pipeline_run_id = None
+        started_at = utcnow()
         try:
             job = self.jobs.start(job_id)
             pipeline_run_id = self._begin_run(job)
             self._emit_state(job, "processing")
+            logger.info(
+                "Job started job_id=%s asset_id=%s pipeline_id=%s",
+                job_id, job.get("asset_id"), job.get("pipeline_id"),
+            )
 
             asset = self.assets.get(job["asset_id"])
             if not asset or not asset.get("active"):
@@ -207,6 +215,10 @@ class PipelineExecutionService:
             self.jobs.complete(job_id)
             self.runs.update_status(pipeline_run_id, status="completed", finished_at=utcnow(), error=None)
             self._emit_state({**job, "last_error": None}, "completed")
+            logger.info(
+                "Job completed job_id=%s in %.1fs",
+                job_id, (utcnow() - started_at).total_seconds(),
+            )
         except Exception as exc:
             error = {
                 "class": exc.__class__.__name__,
@@ -215,7 +227,12 @@ class PipelineExecutionService:
             }
             # Config errors (unknown/unbuilt node, cycle, missing input) can't
             # succeed on retry — fail them now instead of looping with backoff.
-            self._fail(job_id, pipeline_run_id, error, permanent=isinstance(exc, PermanentNodeError))
+            permanent = isinstance(exc, PermanentNodeError)
+            logger.warning(
+                "Job failed job_id=%s permanent=%s: %s: %s",
+                job_id, permanent, error["class"], error["message"],
+            )
+            self._fail(job_id, pipeline_run_id, error, permanent=permanent)
             raise
 
     def _begin_run(self, job: dict[str, Any]) -> str:
@@ -251,6 +268,11 @@ class PipelineExecutionService:
         if final_status == "queued":
             next_attempt_at = utcnow() + timedelta(
                 seconds=self.RETRY_DELAYS[min(attempts - 1, 2)]
+            )
+        if final_status == "queued":
+            logger.info(
+                "Job job_id=%s retry %d/%d scheduled for %s",
+                job_id, attempts, self.MAX_ATTEMPTS, next_attempt_at,
             )
         self.jobs.fail(job_id, final_status=final_status, next_attempt_at=next_attempt_at, error=error)
         if pipeline_run_id:
@@ -317,6 +339,10 @@ class PipelineExecutionService:
                     f"which no upstream node produced"
                 )
             executor = self._get_executor(node.node_type)
+            logger.debug(
+                "Running node %d/%d: %s (%s)",
+                topo_index + 1, len(order), node.node_type, node.node_id,
+            )
             updates = executor.run(context, node.config) or {}
             node.order = topo_index
             self._persist_outputs(job, asset, pipeline_run_id, node, executor, updates)

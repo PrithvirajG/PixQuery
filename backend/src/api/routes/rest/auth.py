@@ -7,11 +7,13 @@ from src.api.dependencies import (
     get_image_assets_repository,
     get_users_repository,
 )
+from src.logging_config import get_logger
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.users_repository import UsersRepository
 from src.api.security import hash_password, verify_password, create_access_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = get_logger(__name__)
 
 class UserRegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -47,11 +49,12 @@ async def register(
 
     pwd_hash = hash_password(data.password)
     user = users.create(data.username, pwd_hash)
+    logger.info("User registered username=%r user_id=%s", data.username, user["_id"])
 
     # If this is the first user, auto-claim any existing unowned assets!
     if is_first:
         claimed = assets.claim_unowned(user["_id"])
-        print(f"First user '{data.username}' registered. Claimed {claimed} unowned assets.")
+        logger.info("First user '%s' claimed %d unowned assets", data.username, claimed)
 
     return {"id": user["_id"], "username": user["username"]}
 
@@ -63,12 +66,14 @@ async def login(
 ):
     user = users.get_by_username(data.username)
     if not user:
+        logger.warning("Login failed: unknown username=%r", data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
         )
 
     if not verify_password(data.password, user["hashed_password"]):
+        logger.warning("Login failed: bad password user_id=%s", user["_id"])
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password"
@@ -77,7 +82,7 @@ async def login(
     # Claim any assets ingested without an owner (e.g. ingested before this user existed)
     claimed = assets.claim_unowned(user["_id"])
     if claimed:
-        print(f"Login '{data.username}': claimed {claimed} previously unowned assets.")
+        logger.info("Login user_id=%s claimed %d previously unowned assets", user["_id"], claimed)
 
     token = create_access_token(data={"sub": user["_id"]})
     return {"access_token": token, "token_type": "bearer"}

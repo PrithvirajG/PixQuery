@@ -14,18 +14,18 @@ workspace mid-session starts delivering its events without a reconnect.
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.api.security import authenticate_from_token
 from src.config import EVENTS_ENABLED
+from src.logging_config import get_logger
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.access_scope import accessible_workspace_ids
 
 router = APIRouter(tags=["websocket"])
 
-logger = logging.getLogger("pixquery.ws")
+logger = get_logger(__name__)
 
 # Re-resolve the user's workspace list at most this often (seconds). Membership
 # changes are rare; this keeps a long-lived socket from hammering Mongo per event.

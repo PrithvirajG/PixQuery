@@ -18,14 +18,14 @@ return a generic message.
 """
 from __future__ import annotations
 
-import logging
-
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-logger = logging.getLogger("pixquery.api")
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Machine-readable code for each HTTP status we emit.
 _STATUS_CODES: dict[int, str] = {

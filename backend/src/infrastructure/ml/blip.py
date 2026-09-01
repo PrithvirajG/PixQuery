@@ -2,18 +2,13 @@ from transformers import BlipProcessor, BlipForConditionalGeneration
 from PIL import Image
 from .interface import ModelInterface
 import numpy as np
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from src.logging_config import get_logger
 
 class BlipModel(ModelInterface):
     def __init__(self, model_name='Salesforce/blip-image-captioning-base'):
         self.processor = BlipProcessor.from_pretrained(model_name, use_fast=True)
         self.model = BlipForConditionalGeneration.from_pretrained(model_name)
-        self.logger = logging.getLogger("BlipModel")
+        self.logger = get_logger(__name__)
         self.logger.info(f"BLIP model has been loaded from path {model_name}")
 
     def describe(self, image: Image.Image) -> str | None:

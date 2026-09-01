@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -16,8 +15,9 @@ from src.config import (
     RUN_MIGRATIONS_ON_STARTUP,
     WATCH_ROOT,
 )
+from src.logging_config import bind_request_id, get_logger, reset_request_id
 
-logger = logging.getLogger("pixquery.api")
+logger = get_logger(__name__)
 
 # Fail fast at startup rather than waiting out pymongo's 30s default so an
 # operator sees the problem immediately instead of after a long hang.
@@ -106,6 +106,23 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Added after CORSMiddleware so it wraps *outside* it (Starlette runs the
+    # most-recently-added middleware first) — every request gets a trace id
+    # bound before anything else touches it, including CORS handling and the
+    # error envelope. The same id rides any RabbitMQ message this request
+    # publishes (see RabbitPublisher.publish's default correlation_id), so a
+    # workspace scan is traceable end-to-end: this log line, the scan_commands
+    # consumer's, and the pipeline-worker's all share it.
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id, token = bind_request_id(request.headers.get("X-Request-ID"))
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     register_error_handlers(app)
 

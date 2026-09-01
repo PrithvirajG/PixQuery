@@ -11,13 +11,13 @@ see ``RUN_MIGRATIONS_ON_STARTUP``).
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from src.logging_config import get_logger
 from src.utils.time import utcnow
 
-logger = logging.getLogger("migrations")
+logger = get_logger(__name__)
 
 MIGRATIONS_COLLECTION = "schema_migrations"
 

@@ -7,6 +7,7 @@ from src.domain_events import outputs_cleared_event
 from src.errors.graph import GraphCycleError, UnknownNodeError
 from src.errors.pipelines import PipelineValidationError
 from src.infrastructure.messaging import EventSink
+from src.logging_config import get_logger
 from src.repositories.model_outputs_repository import ModelOutputsRepository
 from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
 from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
@@ -15,6 +16,8 @@ from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
 from src.utils.graph import topological_order
+
+logger = get_logger(__name__)
 
 
 class PipelineService:
@@ -152,6 +155,10 @@ class PipelineService:
             self.workspaces.remove_pipeline_id(workspace_id, pipeline_id)
 
         deleted = self.pipelines.delete(pipeline_id)
+        logger.info(
+            "Pipeline deleted id=%s owner_id=%s runs_deleted=%d affected_workspaces=%d",
+            pipeline_id, owner_id, len(run_ids), len(affected_workspaces),
+        )
         if deleted and self.event_sink is not None:
             # One event per affected workspace: any image detail view open on that
             # workspace drops the section instead of showing outputs that are gone.
