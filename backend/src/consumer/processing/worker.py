@@ -3,7 +3,7 @@ import asyncio
 from src.consumer.processing import ImageProcessorConsumer
 
 
-async def start_worker():
+async def start_pipeline_worker():
     consumer = ImageProcessorConsumer()
     await consumer.connect()
     await consumer.start_consuming()

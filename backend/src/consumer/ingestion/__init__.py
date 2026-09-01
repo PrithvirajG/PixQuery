@@ -10,7 +10,7 @@ from src.utils.files import sha256_file, wait_for_stable_file
 if TYPE_CHECKING:
     from src.consumer.ingestion.filesystem_watcher import ImageEventHandler, WorkspaceWatcher
     from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
-    from src.consumer.ingestion.worker import start_monitoring
+    from src.consumer.ingestion.worker import start_file_watcher
 
 __all__ = [
     "FileNotStableError",
@@ -21,7 +21,7 @@ __all__ = [
     "WorkspaceWatcher",
     "pipeline_version_hash",
     "sha256_file",
-    "start_monitoring",
+    "start_file_watcher",
     "wait_for_stable_file",
 ]
 
@@ -39,8 +39,8 @@ def __getattr__(name):
         from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
 
         return ScanCommandConsumer
-    if name == "start_monitoring":
-        from src.consumer.ingestion.worker import start_monitoring
+    if name == "start_file_watcher":
+        from src.consumer.ingestion.worker import start_file_watcher
 
-        return start_monitoring
+        return start_file_watcher
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

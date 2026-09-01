@@ -15,10 +15,10 @@ docker compose -f docker-compose.infra.yml up -d   # MongoDB:27017, RabbitMQ:567
 
 ### Backend
 ```bash
-cd backend && pip install -r requirements.txt       # or: pip install -e ".[api,worker,monitor]"
+cd backend && pip install -r requirements.txt       # or: pip install -e ".[api,pipeline-worker,file-watcher]"
 cd backend && uvicorn api_main:app --reload --port 8000   # API server
-cd backend && python worker_main.py                 # RabbitMQ consumer / pipeline executor
-cd backend && python monitoring_main.py             # filesystem watcher + reconciler
+cd backend && python pipeline_worker_main.py                 # RabbitMQ consumer / pipeline executor
+cd backend && python file_watcher_main.py             # filesystem watcher + reconciler
 cd backend && python -m src.migrations              # run pending DB migrations manually
 ```
 
@@ -42,7 +42,7 @@ cd frontend && npm run build                        # production build
 Three independent backend processes communicate through MongoDB and RabbitMQ:
 
 ```
-monitoring_main.py  →  RabbitMQ (image_task queue)  →  worker_main.py
+file_watcher_main.py  →  RabbitMQ (image_task queue)  →  pipeline_worker_main.py
         ↓                                                      ↓
     MongoDB                                              Weaviate (vectors)
         ↑
@@ -50,8 +50,8 @@ monitoring_main.py  →  RabbitMQ (image_task queue)  →  worker_main.py
 ```
 
 - **`api_main.py`** — FastAPI HTTP/WebSocket server. Entry point calls `src.api.create_app()`.
-- **`worker_main.py`** — Consumes `image_task` messages via `src/consumer/processing/image_task_consumer.py`'s `ImageProcessorConsumer`, which runs `PipelineExecutionService` (`src/services/pipeline_execution_service.py`).
-- **`monitoring_main.py`** — Polls workspace definitions from MongoDB, watches filesystem paths via `src/consumer/ingestion/filesystem_watcher.py`'s `WorkspaceWatcher`, which runs `ReconciliationService` (`src/services/reconciliation_service.py`).
+- **`pipeline_worker_main.py`** — Consumes `image_task` messages via `src/consumer/processing/image_task_consumer.py`'s `ImageProcessorConsumer`, which runs `PipelineExecutionService` (`src/services/pipeline_execution_service.py`).
+- **`file_watcher_main.py`** — Polls workspace definitions from MongoDB, watches filesystem paths via `src/consumer/ingestion/filesystem_watcher.py`'s `WorkspaceWatcher`, which runs `ReconciliationService` (`src/services/reconciliation_service.py`).
 
 ### Backend source layout (`backend/src/`)
 
@@ -60,7 +60,7 @@ monitoring_main.py  →  RabbitMQ (image_task queue)  →  worker_main.py
 | `api/routes/` | `rest/` — FastAPI HTTP route handlers: `auth`, `images`, `jobs`, `search`, `stats`, `status`, `workspaces`, `pipelines`, `pipeline_nodes`. `ws/` — WebSocket route handlers, one file per endpoint, each a full connection lifecycle (accept/auth/send-loop/receive-loop/close) rather than split by message direction; today just `events_socket.py`'s `/ws/events` |
 | `api/security.py` | JWT creation/verification, bcrypt password hashing, `authenticate_from_token(token, users)` — the shared decode-then-look-up step for anywhere a token can't travel as an `Authorization` header (today: `api/routes/ws/events_socket.py`, since the browser WebSocket API can't set headers) |
 | `api/dependencies.py` | FastAPI dependency injection — builds the 9 per-collection repositories off one shared connection and wires each service from the specific repos it needs |
-| `services/` | Business logic — `ImageService`, `JobService`, `SearchService`, `PipelineService`, `WorkspaceService`, `StatsService`, plus `PipelineExecutionService` (DAG executor, used by the worker process) and `ReconciliationService` (filesystem ingestion, used by the monitor process) |
+| `services/` | Business logic — `ImageService`, `JobService`, `SearchService`, `PipelineService`, `WorkspaceService`, `StatsService`, plus `PipelineExecutionService` (DAG executor, used by the pipeline-worker process) and `ReconciliationService` (filesystem ingestion, used by the file-watcher process) |
 | `services/access_scope.py` | Composes workspace + observation repositories into "what can this user/workspace see" (`accessible_workspace_ids`, `accessible_asset_ids`, `workspace_asset_ids`, `can_access_asset`) — the one join every visibility-scoped query shares |
 | `services/executors/` | `registry.py` maps `node_type` strings → cached `BaseNodeExecutor` subclasses; `builtin.py` has implementations for `object_detection`, `face_detection`, `classification`, `captioning`, `embedding`, `resize`, `grayscale`, `image_write`, `ocr` |
 | `models/documents.py` | Pydantic v2 document models — one class per MongoDB collection; **source of truth for schema**. Persist via `Model(...).to_doc()` |
@@ -72,9 +72,9 @@ monitoring_main.py  →  RabbitMQ (image_task queue)  →  worker_main.py
 | `infrastructure/ml/` | Model wrappers (`BlipModel`, `ClipModel`, `YoloModel`, `ModelInterface`) — loaded lazily by the executors above and by `infrastructure/vector_store/query_encoder.py` |
 | `infrastructure/messaging/` | Generic transport primitives only — every named publisher/consumer lives in `publisher/`/`consumer/` instead (see below). `rabbitmq_publisher.py`'s `RabbitPublisher` and `rabbitmq_consumer.py`'s `RabbitConsumer` are the named-durable-queue pattern (competing consumers, one message each), both sharing `rabbitmq_connection.py`'s `_connect_with_retry`. `event_sink.py`'s `EventSink` — the mutable, swappable sink every service emits domain events through (armed with a real `EventPublisher` after each process's event loop starts) |
 | `infrastructure/vector_store/` | `protocol.py` (`VectorSearchClient`, `QueryEncoder`), `weaviate.py` (`WeaviateEmbeddingStore` writes + `WeaviateSearchClient` reads), `query_encoder.py` (`ClipQueryEncoder`) |
-| `consumer/` | Every RabbitMQ consumer in the codebase, one subpackage per concern, regardless of which process runs it — every one of them subclasses `RabbitConsumer` (`connect()`/`start_consuming()`/`on_message()`/`close()`), even when it overrides most of that contract's body rather than reusing it (see `events/` below); the point is a consistent interface and one place to find "every consumer," not maximal code sharing. `processing/` and `ingestion/` are full background processes with their own `worker.py` bootstrap (`worker_main.py`/`monitoring_main.py`); `events/` has no `worker.py` — its `EventConsumer` is instantiated lazily *inside* the API process by `api/routes/ws/events_socket.py`, not run standalone. |
-| `consumer/processing/` | `image_task_consumer.py`'s `ImageProcessorConsumer(RabbitConsumer)` — consumes `image_task`, hands each job id to `PipelineExecutionService.run_job`, requeues on backoff. `worker.py`'s `start_worker()` is the process bootstrap `worker_main.py` calls |
-| `consumer/ingestion/` | Two independent consumers driving `ReconciliationService` per workspace: `filesystem_watcher.py`'s `WorkspaceWatcher` + `ImageEventHandler` (one watchdog `Observer` per workspace, not RabbitMQ) and `scan_command_consumer.py`'s `ScanCommandConsumer(RabbitConsumer)` (consumes `scan_commands`, the manual "Scan" button's redispatch-failed path). `worker.py`'s `start_monitoring()` is the process bootstrap `monitoring_main.py` calls — builds the repos, starts the watcher, connects the scan consumer, runs the refresh/reconcile loop |
+| `consumer/` | Every RabbitMQ consumer in the codebase, one subpackage per concern, regardless of which process runs it — every one of them subclasses `RabbitConsumer` (`connect()`/`start_consuming()`/`on_message()`/`close()`), even when it overrides most of that contract's body rather than reusing it (see `events/` below); the point is a consistent interface and one place to find "every consumer," not maximal code sharing. `processing/` and `ingestion/` are full background processes with their own `worker.py` bootstrap (`pipeline_worker_main.py`/`file_watcher_main.py`); `events/` has no `worker.py` — its `EventConsumer` is instantiated lazily *inside* the API process by `api/routes/ws/events_socket.py`, not run standalone. |
+| `consumer/processing/` | `image_task_consumer.py`'s `ImageProcessorConsumer(RabbitConsumer)` — consumes `image_task`, hands each job id to `PipelineExecutionService.run_job`, requeues on backoff. `worker.py`'s `start_pipeline_worker()` is the process bootstrap `pipeline_worker_main.py` calls |
+| `consumer/ingestion/` | Two independent consumers driving `ReconciliationService` per workspace: `filesystem_watcher.py`'s `WorkspaceWatcher` + `ImageEventHandler` (one watchdog `Observer` per workspace, not RabbitMQ) and `scan_command_consumer.py`'s `ScanCommandConsumer(RabbitConsumer)` (consumes `scan_commands`, the manual "Scan" button's redispatch-failed path). `worker.py`'s `start_file_watcher()` is the process bootstrap `file_watcher_main.py` calls — builds the repos, starts the watcher, connects the scan consumer, runs the refresh/reconcile loop |
 | `consumer/events/` | `event_consumer.py`'s `EventConsumer(RabbitConsumer)` — binds an exclusive queue to the `pixquery.events` fanout exchange and fans each event out to every WebSocket open in this API process. Overrides `connect()`/`start_consuming()` outright rather than calling `super()`: fanout pub/sub against an anonymous/exclusive/auto-delete queue with `no_ack=True` is a different delivery pattern than `RabbitConsumer.connect()`'s named durable queue for competing consumers, so reusing that body would declare the wrong kind of queue — see the module docstring. The only caller is `api/routes/ws/events_socket.py`'s lazily-started `get_subscriber()`, which now does `connect()` then `start_consuming()`, same two-step lifecycle as the other two consumers' `worker.py` |
 | `publisher/` | Every named RabbitMQ publisher in the codebase — the mirror image of `consumer/`, same reasoning (one place to find "every publisher," each subclasses `RabbitPublisher`). Just `events/` today. |
 | `publisher/events/` | `event_publisher.py`'s `EventPublisher(RabbitPublisher)` — the publish half of the live-events fanout; see `infrastructure/messaging/`'s row and `consumer/events/`'s row for the consume-side mirror. Constructed and `connect()`-ed directly in each of the three processes (`api/app.py::_start_event_bus`, `consumer/processing/image_task_consumer.py`, `consumer/ingestion/worker.py`), then wired into that process's `EventSink` |
@@ -82,9 +82,9 @@ monitoring_main.py  →  RabbitMQ (image_task queue)  →  worker_main.py
 
 ### Key data flow
 
-1. `monitoring_main.py` scans workspace paths, calls `ReconciliationService.reconcile()`.
+1. `file_watcher_main.py` scans workspace paths, calls `ReconciliationService.reconcile()`.
 2. The service computes SHA-256 of each file, upserts `image_assets` + `file_observations` in MongoDB, creates `processing_jobs`, publishes job IDs to RabbitMQ. A newly-created job (and a manually redispatched failed one) emits a `pipeline_state_event(state="queued")` through the injected `EventSink` — that's an explicit call in the service now, not an implicit side effect of the write.
-3. `worker_main.py` picks up job ID, loads the asset, runs each `ResolvedNode` in the pipeline through its registered executor, stores outputs in `model_outputs`, upserts vectors to Weaviate, marks job `completed`. `PipelineExecutionService` also owns the job's retry policy (`RETRY_DELAYS`, `MAX_ATTEMPTS`) and emits every state/stage transition itself, for the same reason — the repositories underneath are pure CRUD with no side effects of their own.
+3. `pipeline_worker_main.py` picks up job ID, loads the asset, runs each `ResolvedNode` in the pipeline through its registered executor, stores outputs in `model_outputs`, upserts vectors to Weaviate, marks job `completed`. `PipelineExecutionService` also owns the job's retry policy (`RETRY_DELAYS`, `MAX_ATTEMPTS`) and emits every state/stage transition itself, for the same reason — the repositories underneath are pure CRUD with no side effects of their own.
 4. `api_main.py` serves assets/search/stats to the React frontend. Search supports `keyword` (MongoDB substring), `semantic` (Weaviate vector), and `hybrid` (merged + re-ranked) modes.
 
 **Processing is workspace-scoped.** Assets are unique on `(workspace_id, content_sha256)` and jobs on `(workspace_id, asset_id, pipeline_id, pipeline_version)` — the same image in two workspaces is processed and stored twice, independently. Dedup applies only *within* a workspace.

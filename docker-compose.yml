@@ -26,12 +26,12 @@ services:
     networks:
       - pixquery_net
 
-  ingestor:
+  file-watcher:
     build:
       context: ./backend
-      dockerfile: Dockerfile.monitor
-    container_name: pixquery-ingestor
-    command: python monitoring_main.py
+      dockerfile: Dockerfile.file-watcher
+    container_name: pixquery-file-watcher
+    command: python file_watcher_main.py
     volumes:
       - ./backend:/app
       - ${PIXQUERY_PHOTOS:-~/pixquery_photos}:/data/photos
@@ -46,12 +46,12 @@ services:
     networks:
       - pixquery_net
 
-  worker:
+  pipeline-worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile.worker
-    container_name: pixquery-worker
-    command: python worker_main.py
+      dockerfile: Dockerfile.pipeline-worker
+    container_name: pixquery-pipeline-worker
+    command: python pipeline_worker_main.py
     volumes:
       - ./backend:/app
       - ${PIXQUERY_PHOTOS:-~/pixquery_photos}:/data/photos

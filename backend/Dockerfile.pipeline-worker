@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY ./src /app/src
-COPY worker_main.py .
-COPY requirements.worker.txt .
+COPY pipeline_worker_main.py .
+COPY requirements.pipeline-worker.txt .
 
-RUN pip install --no-cache-dir -r requirements.worker.txt
+RUN pip install --no-cache-dir -r requirements.pipeline-worker.txt
 
-CMD ["python", "worker_main.py"]
+CMD ["python", "pipeline_worker_main.py"]

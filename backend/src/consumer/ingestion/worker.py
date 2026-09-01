@@ -22,7 +22,7 @@ from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 
 
-async def start_monitoring() -> None:
+async def start_file_watcher() -> None:
     """Start the multi-workspace monitor driven entirely by workspace_definitions in MongoDB."""
     # One live connection, shared by every repository below — bootstrapped once
     # here (index creation, system-node seeding), same as api/dependencies.py.

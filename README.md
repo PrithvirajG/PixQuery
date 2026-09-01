@@ -12,7 +12,7 @@ Everything runs on your own machine — images and AI outputs never leave it.
 Three independent backend processes communicate through MongoDB and RabbitMQ:
 
 ```
- monitoring_main.py            worker_main.py
+ file_watcher_main.py            pipeline_worker_main.py
  (filesystem watcher)          (pipeline executor)
         │                              │
         │ scans workspace folders      │ consumes job IDs
@@ -33,9 +33,9 @@ Three independent backend processes communicate through MongoDB and RabbitMQ:
                               └─────────────┘  +WS └──────────────┘
 ```
 
-- **`monitoring_main.py`** — reads workspace definitions from MongoDB, watches
+- **`file_watcher_main.py`** — reads workspace definitions from MongoDB, watches
   their folders, and dispatches processing jobs via `FilesystemReconciler`.
-- **`worker_main.py`** — consumes `image_task` messages and runs the processing
+- **`pipeline_worker_main.py`** — consumes `image_task` messages and runs the processing
   pipeline, writing model outputs to MongoDB and embeddings to Weaviate.
 - **`api_main.py`** — serves auth, images, search, jobs, workspaces, pipelines,
   and stats to the frontend.
@@ -59,16 +59,16 @@ docker compose -f docker-compose.infra.yml up -d
 
 # 2. Backend dependencies
 cd backend
-pip install -r requirements.txt          # or: pip install -e ".[api,worker,monitor]"
+pip install -r requirements.txt          # or: pip install -e ".[api,pipeline-worker,file-watcher]"
 
 # 3. API server                          → http://localhost:8000
 uvicorn api_main:app --reload --port 8000
 
 # 4. Worker (new terminal, in backend/)
-python worker_main.py
+python pipeline_worker_main.py
 
 # 5. Monitor / filesystem watcher (new terminal, in backend/)
-python monitoring_main.py
+python file_watcher_main.py
 
 # 6. Frontend (new terminal)             → http://localhost:3000
 cd frontend
@@ -123,10 +123,10 @@ to the monitor/worker process — check this first.
 
 ## Troubleshooting
 
-- **No jobs appear after creating a workspace** — confirm `monitoring_main.py` is
+- **No jobs appear after creating a workspace** — confirm `file_watcher_main.py` is
   running and the workspace path is valid *for that process* (see path mapping).
 - **Jobs stay `queued`** — the worker isn't running or can't reach RabbitMQ; check
-  `python worker_main.py` output and that `docker compose -f docker-compose.infra.yml ps` shows RabbitMQ healthy.
+  `python pipeline_worker_main.py` output and that `docker compose -f docker-compose.infra.yml ps` shows RabbitMQ healthy.
 - **Jobs go to `failed`** — open the job to read the recorded error; common causes
   are missing model weights (first run) or the file changing during processing.
 - **Semantic search returns nothing / falls back to keyword** — Weaviate is

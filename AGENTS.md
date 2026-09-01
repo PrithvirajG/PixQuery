@@ -24,10 +24,10 @@ Root-level `docker-compose.infra.yml` starts the three infrastructure services (
 ## Build, Test, and Development Commands
 
 - `docker compose -f docker-compose.infra.yml up -d`: start local infrastructure (MongoDB:27017, RabbitMQ:5672/15672, Weaviate:8080).
-- `cd backend && pip install -r requirements.txt`: install backend runtime dependencies (or `pip install -e ".[api,worker,monitor]"`).
+- `cd backend && pip install -r requirements.txt`: install backend runtime dependencies (or `pip install -e ".[api,pipeline-worker,file-watcher]"`).
 - `cd backend && uvicorn api_main:app --reload --port 8000`: run the FastAPI API locally. The entry point `api_main.py` calls `src.api.create_app()`.
-- `cd backend && python worker_main.py`: run the RabbitMQ consumer / pipeline executor.
-- `cd backend && python monitoring_main.py`: run the filesystem watcher + reconciler.
+- `cd backend && python pipeline_worker_main.py`: run the RabbitMQ consumer / pipeline executor.
+- `cd backend && python file_watcher_main.py`: run the filesystem watcher + reconciler.
 - `cd backend && python -m unittest discover tests`: run backend tests. Single file: `python -m unittest tests.test_filesystem_pipeline`.
 - `cd frontend && npm install`: install React dependencies.
 - `cd frontend && npm start`: start the React dev server at `http://localhost:3000`.

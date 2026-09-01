@@ -48,7 +48,7 @@ PixQuery provides:
 └───────┬──────┘                           │
         │                         ┌────────▼─────────────┐
         │                         │  Worker Process      │
-        │                         │  (worker_main.py)    │
+        │                         │  (pipeline_worker_main.py)    │
         │                         │  Pipeline executor   │
         │                         └────────┬─────────────┘
         │                                  │
@@ -58,7 +58,7 @@ PixQuery provides:
         │        metadata         └──────────────────────┘
         │
 ┌───────▼─────────────────────────────────────────────────────────┐
-│  Filesystem Watcher  (monitoring_main.py)                        │
+│  Filesystem Watcher  (file_watcher_main.py)                        │
 │  Reconciler — scans workspace paths, publishes jobs to RabbitMQ  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -307,8 +307,8 @@ All views share the **dark glassmorphic theme**: `bg-slate-950` base, violet/blu
 | Entry Point | Role |
 |-------------|------|
 | `api_main.py` | FastAPI HTTP server (uvicorn) |
-| `worker_main.py` | RabbitMQ consumer; executes pipeline nodes per job |
-| `monitoring_main.py` | Filesystem watcher + reconciler; publishes jobs |
+| `pipeline_worker_main.py` | RabbitMQ consumer; executes pipeline nodes per job |
+| `file_watcher_main.py` | Filesystem watcher + reconciler; publishes jobs |
 
 ### 8.3 Configuration (Environment Variables)
 
@@ -424,7 +424,7 @@ Introduced alongside the access-control refactor to make the schema explicit and
 
 Every collection has a Pydantic v2 model (`User`, `ImageAsset`, `FileObservation`, `ProcessingJob`, `PipelineRun`, `ModelOutput`, `WorkspaceDefinition` + embedded `WorkspaceMember`, `PipelineNode`, `PipelineDefinition`). All top-level documents extend `BaseDocument`, which maps `id ↔ _id` and exposes `to_doc()` (dumps with the `_id` alias). The repository constructs documents from these models, replacing ~10 inline dict literals — so field names, defaults, and types live in one validated place. Models are intentionally `extra="ignore"` on read so legacy documents still load.
 
-> Dependency note: `pydantic>=2.7` is now a **core** dependency (was only transitively present via FastAPI). It's been added to `pyproject.toml` `[project.dependencies]` and to `requirements.txt` / `requirements.worker.txt` / `requirements.monitor.txt`, because the worker and monitor import the repository and therefore the models.
+> Dependency note: `pydantic>=2.7` is now a **core** dependency (was only transitively present via FastAPI). It's been added to `pyproject.toml` `[project.dependencies]` and to `requirements.txt` / `requirements.pipeline-worker.txt` / `requirements.file-watcher.txt`, because the worker and monitor import the repository and therefore the models.
 
 ### 10.2.2 Migration runner (`backend/src/migrations/`)
 
@@ -482,10 +482,10 @@ cd backend && pip install -r requirements.txt
 uvicorn api_main:app --reload --port 8000
 
 # Worker
-cd backend && python worker_main.py
+cd backend && python pipeline_worker_main.py
 
 # Filesystem monitor
-cd backend && python monitoring_main.py
+cd backend && python file_watcher_main.py
 
 # Frontend
 cd frontend && npm install && npm start
