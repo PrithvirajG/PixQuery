@@ -215,7 +215,7 @@ describe('ImageDetails — pipeline state', () => {
 
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
     expect(screen.getByText('Not started')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Process/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Run this pipeline against this image/ })).toBeEnabled();
   });
 
   test('a completed pipeline offers Reprocess', async () => {
@@ -223,7 +223,7 @@ describe('ImageDetails — pipeline state', () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Completed')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /Reprocess/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Re-run this pipeline/ })).toBeEnabled();
   });
 
   test.each(['queued', 'processing'])('the button is disabled while %s', async (state) => {
@@ -236,7 +236,7 @@ describe('ImageDetails — pipeline state', () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /Process/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Already running/ })).toBeDisabled();
   });
 
   test('a failed pipeline shows its error message', async () => {
@@ -267,7 +267,9 @@ describe('ImageDetails — pipeline state', () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Detached')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: /Process/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Run this pipeline against this image|Re-run this pipeline/ })
+    ).not.toBeInTheDocument();
   });
 
   test('explains when no pipelines are attached to the workspace', async () => {
@@ -295,7 +297,7 @@ describe('ImageDetails — triggering a run', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: /Process/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Run this pipeline against this image/ }));
 
     await waitFor(() =>
       expect(axios.post).toHaveBeenCalledWith(`${API}/images/asset-1/reprocess`, {
@@ -320,7 +322,7 @@ describe('ImageDetails — triggering a run', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: /Process/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Run this pipeline against this image/ }));
 
     await waitFor(() =>
       expect(
@@ -343,7 +345,7 @@ describe('ImageDetails — deleting a pipeline’s outputs', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete outputs' }));
+    fireEvent.click(screen.getByRole('button', { name: /afterwards\)$/ }));
 
     expect(window.confirm).toHaveBeenCalled();
     expect(axios.delete).not.toHaveBeenCalled();
@@ -357,7 +359,7 @@ describe('ImageDetails — deleting a pipeline’s outputs', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete outputs' }));
+    fireEvent.click(screen.getByRole('button', { name: /afterwards\)$/ }));
 
     await waitFor(() =>
       // Scoped to the image — not the workspace-wide clear on the workspaces route.
@@ -375,7 +377,7 @@ describe('ImageDetails — deleting a pipeline’s outputs', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    expect(screen.getByRole('button', { name: 'Delete outputs' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Nothing to delete/ })).toBeDisabled();
   });
 
   test('surfaces a failure without blanking the page', async () => {
@@ -388,7 +390,7 @@ describe('ImageDetails — deleting a pipeline’s outputs', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Test Pipeline')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete outputs' }));
+    fireEvent.click(screen.getByRole('button', { name: /afterwards\)$/ }));
 
     await waitFor(() =>
       expect(

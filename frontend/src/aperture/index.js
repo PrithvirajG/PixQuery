@@ -4,3 +4,4 @@
 // exists as the one place that names the whole public surface at once.
 export * from './kit';
 export * from './blocks';
+export * from './logo';

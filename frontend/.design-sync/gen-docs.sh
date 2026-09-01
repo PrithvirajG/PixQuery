@@ -11,6 +11,7 @@ write GhostBtn "Buttons"
 write LumenBtn "Buttons"
 write IconBtn "Buttons"
 write ActBtn "Buttons"
+write EyeBtn "Buttons"
 write Toggle "Buttons"
 
 write ApInput "Inputs"
@@ -32,7 +33,7 @@ write Counter "Data Display"
 write ObjRow "Data Display"
 write Meter "Data Display"
 write OutputBody "Data Display"
-write OutputCard "Data Display"
+write StageCard "Data Display"
 write Muted "Data Display"
 
 write Eyebrow "Layout & Chrome"
@@ -41,14 +42,13 @@ write Photo "Layout & Chrome"
 write Kbd "Layout & Chrome"
 
 write MagIcon "Icons"
-write ApertureMark "Icons"
 write IconSearch "Icons"
 write IconWorkspaces "Icons"
 write IconPipelines "Icons"
 write IconJobs "Icons"
 
-write ProcessButton "Pipeline Outputs"
-write DeleteOutputsBtn "Pipeline Outputs"
 write PipelineSection "Pipeline Outputs"
+
+write Logo "Brand"
 
 ls .design-sync/component-docs/ | wc -l

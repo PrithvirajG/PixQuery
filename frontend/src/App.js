@@ -10,7 +10,8 @@ import ImageDetails from './pages/ImageDetails';
 import JobsView from './views/JobsView';
 import LandingPage from './pages/LandingPage';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { AP, ApertureMark } from './aperture/kit';
+import { AP } from './aperture/kit';
+import { Logo } from './aperture/logo';
 
 function Dashboard() {
   return (
@@ -42,7 +43,7 @@ function LoadingScreen() {
       }}
     >
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18 }}>
-        <ApertureMark size={40} />
+        <Logo variant="mark" size={40} />
         <span style={{ fontFamily: AP.mono, fontSize: 12, color: AP.ink3 }}>verifying session…</span>
       </div>
     </div>

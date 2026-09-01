@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { errorMessage } from '../lib/apiError';
+import { Logo } from '../aperture/logo';
 
 function LandingPage() {
   const { login, register } = useAuth();
@@ -83,14 +84,7 @@ function LandingPage() {
 
       {/* Global Header */}
       <header className="relative z-10 container mx-auto px-6 py-5 flex items-center justify-between border-b border-slate-900/60 backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-violet-600 to-blue-500 flex items-center justify-center shadow-[0_0_20px_rgba(139,92,246,0.4)]">
-            <span className="text-xl font-bold text-white tracking-wider">PQ</span>
-          </div>
-          <span className="text-2xl font-extrabold bg-gradient-to-r from-white via-slate-100 to-violet-300 bg-clip-text text-transparent">
-            PixQuery
-          </span>
-        </div>
+        <Logo size={34} />
         <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-400">
           <a href="#features" className="hover:text-violet-400 transition-colors">Features</a>
           <a href="#technology" className="hover:text-violet-400 transition-colors">Technology</a>

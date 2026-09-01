@@ -47,34 +47,6 @@ export const MagIcon = ({ size = 16, c = AP.ink3 }) => (
   </svg>
 );
 
-// aperture brand mark — concentric ring with Lumen glow
-export const ApertureMark = ({ size = 22 }) => (
-  <span
-    style={{
-      position: 'relative',
-      width: size,
-      height: size,
-      borderRadius: 99,
-      flex: '0 0 auto',
-      background: AP.lumenGrad,
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      boxShadow: `0 0 0 1px ${AP.lumenLine}, 0 0 16px rgba(124,108,247,.55)`,
-    }}
-  >
-    <span
-      style={{
-        width: size * 0.34,
-        height: size * 0.34,
-        borderRadius: 99,
-        background: AP.base,
-        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,.25)',
-      }}
-    />
-  </span>
-);
-
 // ── buttons ──
 export const GhostBtn = ({ children, onClick, style = {}, title, disabled, type = 'button' }) => (
   <button
@@ -152,42 +124,96 @@ export const LumenBtn = ({ children, onClick, style = {}, disabled, type = 'butt
   </button>
 );
 
-export const IconBtn = ({ children, onClick, title, active = false }) => (
-  <button
-    type="button"
+// `tone="danger"` gives it the STATUS.err treatment (icon-only sibling of
+// ActBtn's danger tone) for a destructive action in a control cluster.
+// `size` scales the square hit target (34 default; 27 for a header cluster,
+// 20 for a per-stage inline control) and follows the icon down proportionally
+// via `fontSize`/border-radius so small variants don't look like a shrunk
+// version of the big one. `spin` rotates the child icon in place (reuses the
+// shared `.ap-spin` keyframe) for an in-flight action; combine with
+// `active` so a running control reads as lumen-tinted, not neutral.
+export const IconBtn = ({ children, onClick, title, active = false, tone, size = 34, spin = false, disabled = false }) => {
+  const danger = tone === 'danger';
+  const palette = danger
+    ? { c: STATUS.err.c, bg: STATUS.err.bg, hoverBg: 'rgba(240,86,107,.24)', line: STATUS.err.line }
+    : active
+      ? { c: AP.lumenSoft, bg: AP.lumenBg2, hoverBg: AP.lumenBg2, line: AP.lumenLine }
+      : { c: AP.ink2, hoverC: AP.ink, bg: 'rgba(255,255,255,0.03)', hoverBg: 'rgba(255,255,255,0.07)', line: AP.line2 };
+  const off = !!disabled;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      disabled={off}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size >= 27 ? 9 : 7,
+        cursor: off ? 'not-allowed' : 'pointer',
+        flex: '0 0 auto',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: AP.sans,
+        fontSize: Math.round(size * 0.44),
+        color: palette.c,
+        background: palette.bg,
+        border: `1px solid ${palette.line}`,
+        opacity: off ? 0.55 : 1,
+        transition: 'all .14s',
+      }}
+      onMouseEnter={(e) => {
+        if (off) return;
+        e.currentTarget.style.background = palette.hoverBg;
+        e.currentTarget.style.color = palette.hoverC || palette.c;
+      }}
+      onMouseLeave={(e) => {
+        if (off) return;
+        e.currentTarget.style.background = palette.bg;
+        e.currentTarget.style.color = palette.c;
+      }}
+    >
+      <span className={spin ? 'ap-spin' : undefined} style={{ display: 'inline-flex' }}>
+        {children}
+      </span>
+    </button>
+  );
+};
+
+function EyeIcon({ size = 15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M2.6 12s3.6-6.4 9.4-6.4S21.4 12 21.4 12s-3.6 6.4-9.4 6.4S2.6 12 2.6 12z" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="2.9" stroke="currentColor" strokeWidth="1.9" />
+    </svg>
+  );
+}
+function EyeOffIcon({ size = 15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4.3 8.4C3.2 9.7 2.6 12 2.6 12s3.6 6.4 9.4 6.4c1.5 0 2.8-.4 3.9-1M9.3 6c.9-.3 1.8-.4 2.7-.4 5.8 0 9.4 6.4 9.4 6.4s-.9 1.7-2.5 3.3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M4.2 4.2l15.6 15.6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Shows/hides something on the page — a pipeline's outputs, one stage's
+// body — without persisting anything. Deliberately not built on Toggle: a
+// switch (or a checkbox) promises a setting that survives into the next run,
+// which this doesn't. `on` is what's currently visible, not a saved value.
+// A thin wrapper over IconBtn so the eye affordance is one button, defined
+// once, instead of each caller re-picking the icon and re-writing the title.
+export const EyeBtn = ({ on, onClick, size = 27, title }) => (
+  <IconBtn
+    size={size}
+    active={on}
     onClick={onClick}
-    title={title}
-    style={{
-      width: 34,
-      height: 34,
-      borderRadius: 9,
-      cursor: 'pointer',
-      flex: '0 0 auto',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontFamily: AP.sans,
-      fontSize: 15,
-      color: active ? AP.lumenSoft : AP.ink2,
-      background: active ? AP.lumenBg : 'rgba(255,255,255,0.03)',
-      border: `1px solid ${active ? AP.lumenLine : AP.line2}`,
-      transition: 'all .14s',
-    }}
-    onMouseEnter={(e) => {
-      if (!active) {
-        e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
-        e.currentTarget.style.color = AP.ink;
-      }
-    }}
-    onMouseLeave={(e) => {
-      if (!active) {
-        e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-        e.currentTarget.style.color = AP.ink2;
-      }
-    }}
+    title={title || (on ? 'Shown on the page — click to hide' : 'Hidden — click to show')}
   >
-    {children}
-  </button>
+    {on ? <EyeIcon size={Math.round(size * 0.56)} /> : <EyeOffIcon size={Math.round(size * 0.56)} />}
+  </IconBtn>
 );
 
 // small ghost action button (Edit / Statistics / Retry rows). `accent` gives

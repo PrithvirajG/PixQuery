@@ -1,7 +1,8 @@
 // AppShell — Aperture global nav rail (Gallery / Control Room) + content area.
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { AP, ApertureMark, IconSearch, IconWorkspaces, IconPipelines } from '../aperture/kit';
+import { AP, IconSearch, IconWorkspaces, IconPipelines } from '../aperture/kit';
+import { Logo } from '../aperture/logo';
 import { useAuth } from '../context/AuthContext';
 
 const NAV = [
@@ -99,7 +100,7 @@ export default function AppShell({ children }) {
           zIndex: 5,
         }}
       >
-        <ApertureMark size={26} />
+        <Logo variant="mark" size={26} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18, flex: 1, paddingTop: 4 }}>
           {NAV.map((sec, i) => (
             <React.Fragment key={sec.group}>

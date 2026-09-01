@@ -8,7 +8,10 @@ import App from './App';
 // (AuthProvider skips the profile fetch entirely when there's no token).
 test('renders the landing page when there is no authenticated user', () => {
   render(<App />);
-  expect(screen.getByText('PixQuery')).toBeInTheDocument();
+  // The wordmark's two-tone "Pix"/"Query" styling splits the text across
+  // nested spans, so it isn't a single getByText('PixQuery') match — query
+  // the logo lockup by its accessible name instead.
+  expect(screen.getByLabelText('PixQuery')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /login/i })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /sign up free/i })).toBeInTheDocument();
 });

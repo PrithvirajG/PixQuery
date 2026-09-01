@@ -229,6 +229,119 @@ static single-frame screenshot capture:
   parent already had (not a parent API change), manually verify the parent's
   own cards too** — the automated diff can miss it.
 
+- **2026-08-29 — `ApertureMark` replaced by `Logo` (brand mark + wordmark).**
+  Requested via a design template (`templates/logo`) specifying a full brand
+  system as a `<pixquery-logo>` web component: a bracket-cornered pixel-grid
+  mark (not the old plain glowing dot/ring), an optional two-tone "Pix"/"Query"
+  wordmark, 3 variants (`horizontal`/`stacked`/`mark`) and 3 themes
+  (`brand`/`light`/`mono`). Ported into `src/aperture/logo.jsx` as a plain
+  React component (not a custom element) so it shares this repo's render path.
+  New group: **Brand** (previously `ApertureMark` sat under Icons).
+  - **The mark's gradient (`BRAND.light`/`BRAND.dark`, `#A78BFA`→`#6D4AFF`) is
+    deliberately its own constant, not `AP.lumen`/`AP.lumenGrad`.** The two
+    are close in hue but not unified on purpose — re-tuning the UI's Lumen
+    accent (buttons, badges, pills) can never silently redraw the logo, and
+    vice versa. `BRAND` is excluded from the component list via
+    `componentSrcMap: {"BRAND": null}` (same reason as `AP`/`STATUS`) since
+    its capitalized name would otherwise be swept up as a component.
+  - **Accessibility gotcha, worth remembering for any future icon-only
+    component:** a bare `aria-label` on a role-less `<span>` (implicit role
+    "generic") is silently ignored by the browser's accessibility tree — ARIA
+    explicitly prohibits author-provided names on that role. Needed an
+    explicit `role="img"` alongside `aria-label="PixQuery"` before it actually
+    produced a named node. Caught by checking the *real* accessibility tree
+    (`read_page` in a live browser), not just by the Jest/jsdom test passing —
+    jsdom's `getByLabelText` did not catch this gap.
+  - **Test fallout**: `App.test.js`'s `getByText('PixQuery')` broke — the
+    wordmark's two-tone styling splits "Pix" and "Query" across nested spans,
+    and RTL's default text matcher only matches a node's own *direct* text
+    nodes, not full recursive `textContent`. Fixed by asserting on the
+    accessible name (`getByLabelText('PixQuery')`) instead, which is also the
+    more meaningful thing to test.
+  - Replaced both real usages (`App.js`'s loading-screen mark, `AppShell.js`'s
+    nav-rail mark) and the landing page's separate, disconnected ad-hoc "PQ"
+    tile+gradient-text lockup (`LandingPage.js` never used `ApertureMark` at
+    all — it had its own hand-rolled brand block).
+  - **Favicon/app-icon assets were regenerated for real**, not left as
+    placeholders: `public/favicon.svg` (hand-transcribed from the same mark
+    markup — kept in sync manually, no build step ties them together),
+    `public/favicon.ico` (a hand-built minimal ICO container wrapping 32/64px
+    PNGs — ICO supports PNG-compressed frames since Vista, no BMP re-encoding
+    library needed), `logo192.png`/`logo512.png`/`apple-touch-icon.png` (the
+    dark rounded-tile app-icon treatment from the template's "Icons / app
+    usage" section). All rendered via the project's own Playwright install
+    (`.ds-sync/node_modules/playwright`, already there for the render-check)
+    driving `.ds-sync/favicon-render.html` — a one-off, not part of the
+    design-sync pipeline; see `.ds-sync/render-favicons.mjs` and
+    `.ds-sync/build-ico.mjs` if the mark ever changes and these need
+    re-running (note `.ds-sync/` is gitignored, so these scripts don't
+    survive a fresh clone — recreate them or ask for the mark SVG again).
+    `public/manifest.json` was still untouched CRA boilerplate ("React App" /
+    black-on-white theme) — fixed alongside this.
+  - **Found and killed a genuinely stale dev server** (running since Aug 27,
+    survived multiple restart attempts because `pkill -f 'react-scripts
+    start'` never matched its actual argv — a `node .../scripts/start.js`
+    process, not literally containing the string "react-scripts start"). It
+    was silently serving a stale bundle the whole time route changes were
+    being "verified" against it. If a change doesn't appear to take effect
+    after a restart, check `ps -eo pid,lstart,args | grep react-scripts`
+    for a process older than the restart, not just that *a* process exists.
+
+- **2026-08-28 — `PipelineSection` redesigned to a chevron + eye/reprocess/
+  delete control cluster; new `StageCard` for numbered per-output rows.**
+  Requested via a design template (`templates/pipeline-multi-model`) proposing
+  a multi-model section with all three actions collected into one top-right
+  corner cluster and the visibility switch replaced by an eye (since it only
+  controls page display, not a persisted setting).
+  - `IconBtn` (`kit.jsx`) gained `tone="danger"`, `size` (default 34; 27 for
+    the cluster, 20 for a per-stage inline control), `spin` (rotates the
+    child icon via the shared `.ap-spin` keyframe — combine with `active` so
+    a running control reads lumen-tinted), and `disabled`. Backward-compatible:
+    every existing call site only used `children`/`onClick`/`title`/`active`.
+  - `PipelineSection` (`blocks.jsx`) gained its own chevron (local `collapsed`
+    state — pure layout, nothing outside the card depends on it) independent
+    of the `on`/`toggle` eye (lifted to the caller, since it also drives the
+    bbox overlay in `ImageDetails.js`). Collapsing hides everything below the
+    header regardless of the eye; expanded-but-hidden shows the header/meta
+    row but no outputs — "the chevron collapses the section itself, the eye
+    governs what it displays," per the template's own framing.
+  - **Retired `ProcessButton`, `DeleteOutputsBtn`, and `OutputCard`** — folded
+    into the new icon cluster (`PipelineSection`) and `StageCard` respectively.
+    All three had exactly one real call site (inside `PipelineSection`/
+    `ImageDetails.js` itself), so nothing else needed touching.
+  - **New `StageCard`**: a numbered stage row (`index`/`total`, name, trailing
+    model label) with its own page-visibility eye, wrapping `OutputBody`
+    (unchanged) as `children`. `ImageDetails.js` now maps each pipeline's
+    `outputs` through `StageCard` instead of the old flat `OutputCard` list,
+    with a new `hiddenStages` `Set` (keyed `${pipelineKey}:${index}`) for
+    per-stage show/hide.
+  - **Deliberate scope cut, flagged to the user**: the template's stage rows
+    also show a per-stage delete button and a per-stage retry-on-error
+    control. Backend model outputs have no per-node id (`DELETE
+    /images/{id}/outputs/{pipeline_id}` is pipeline-wide only — confirmed via
+    `backend/tests/test_clear_pipeline_outputs.py`), so there is nothing to
+    scope either action to one stage. Built the per-stage eye (real, local-only)
+    and omitted the delete/retry chrome rather than ship buttons wired to
+    nothing — noted in `StageCard`'s own doc comment for the next person who
+    revisits this once/if per-node output tracking exists.
+  - Test fallout: `ImageDetails.test.js` had ~10 assertions keyed on the old
+    components' fixed accessible names (`'Delete outputs'`, `/Process/`,
+    `/Reprocess/`). Updated to match the new icon buttons' `title` text
+    (e.g. `/Run this pipeline against this image/`, `/afterwards\)$/` for
+    delete) — the tradeoff the template itself named ("losing the labelled
+    Process button costs a word of clarity, so the icon keeps a tooltip").
+  - Also fixed a pre-existing console warning in `ObjRow` (shorthand
+    `textDecoration` mixed with longhand `textDecorationColor` — React warns
+    on this combination during rerender) to `textDecorationLine`, noticed
+    incidentally while re-running the suite for this change.
+  - **Removed all 5 `templates/*` proposal pages from the design-system
+    project** (`act-btn-states`, `obj-row-color`, `logo`, `logo-explore`,
+    `pipeline-multi-model`) now that every decision they proposed has shipped
+    in code — `logo-explore` was an earlier, superseded exploration for the
+    same brand-mark decision `templates/logo` settled, not literally
+    "implemented," but kept it around would be stale clutter next to the
+    real `Logo` component.
+
 ## Authoring pass — batch summary
 
 All 37 components were authored via 7 parallel subagents (one per component

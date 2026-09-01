@@ -6,7 +6,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AP, STATUS, Dot, Eyebrow, GhostBtn, LumenBtn, ShimmerCard } from '../aperture/kit';
-import { IN_FLIGHT, Muted, OutputCard, PipelineSection, objColor } from '../aperture/blocks';
+import { IN_FLIGHT, Muted, OutputBody, StageCard, PipelineSection, objColor, outputLabel, outputIcon } from '../aperture/blocks';
 import { API_BASE as API } from '../lib/apiBase';
 import { errorMessage } from '../lib/apiError';
 import { subscribeToEvents } from '../lib/eventSocket';
@@ -159,6 +159,7 @@ export default function ImageDetails() {
   const [error, setError] = useState('');
   const [actionError, setActionError] = useState('');
   const [enabled, setEnabled] = useState({});
+  const [hiddenStages, setHiddenStages] = useState(() => new Set());
   const [copied, setCopied] = useState(false);
   const [naturalDims, setNaturalDims] = useState({ w: 0, h: 0 });
   const [hiddenLabels, setHiddenLabels] = useState(() => new Set());
@@ -711,13 +712,30 @@ export default function ImageDetails() {
                         </div>
                       ) : outputs.length ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                          {outputs.map((o, i) => (
-                            <OutputCard
-                              key={`${o.output_type}-${o.order ?? i}`}
-                              o={o}
-                              detectionState={detectionState}
-                            />
-                          ))}
+                          {outputs.map((o, i) => {
+                            const stageKey = `${key}:${i}`;
+                            return (
+                              <StageCard
+                                key={`${o.output_type}-${o.order ?? i}`}
+                                index={i + 1}
+                                total={outputs.length}
+                                name={outputLabel(o)}
+                                icon={outputIcon(o)}
+                                trailing={o.model_name ? `${o.model_name}${o.model_version ? ` · ${o.model_version}` : ''}` : null}
+                                hidden={hiddenStages.has(stageKey)}
+                                onToggleHidden={() =>
+                                  setHiddenStages((s) => {
+                                    const next = new Set(s);
+                                    if (next.has(stageKey)) next.delete(stageKey);
+                                    else next.add(stageKey);
+                                    return next;
+                                  })
+                                }
+                              >
+                                <OutputBody o={o} detectionState={detectionState} />
+                              </StageCard>
+                            );
+                          })}
                         </div>
                       ) : (
                         <Muted>

@@ -7,7 +7,72 @@
 // same lifecycle at the workspace level).
 import React, { useState } from 'react';
 import { AP, STATUS } from './tokens';
-import { Toggle } from './kit';
+import { IconBtn, EyeBtn } from './kit';
+
+/* ── inline icons for pipeline controls ───────────────────────── */
+// Small stroke icons for the reprocess/delete cluster and the collapse
+// chevron — kept local rather than exported from kit.js because they're
+// single-purpose glyphs for these specific controls, not general primitives.
+// The eye icon lives in kit.js as part of `EyeBtn` — it's a real button in
+// its own right, not a glyph private to this file.
+function ReprocessIcon({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M20 12a8 8 0 1 1-2.6-5.9" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
+      <path d="M20 3.6V7.4h-3.8" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function TrashIcon({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4.5 7h15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9.5 4.5h5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M6.6 7.5l.8 11a1.6 1.6 0 0 0 1.6 1.5h6a1.6 1.6 0 0 0 1.6-1.5l.8-11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10.4 11v6M13.6 11v6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+function ChevronIcon({ collapsed }) {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      style={{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform .14s' }}
+    >
+      <path d="M6 9.5l6 6 6-6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+// Bare, unbordered — distinct from the bordered IconBtn cluster, matching how
+// the section's own collapse control reads as chrome rather than an action.
+function ChevronBtn({ collapsed, onClick, title }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 20,
+        height: 20,
+        borderRadius: 6,
+        background: 'transparent',
+        border: 0,
+        padding: 0,
+        color: collapsed ? AP.ink3 : AP.lumen,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        flex: '0 0 auto',
+      }}
+    >
+      <ChevronIcon collapsed={collapsed} />
+    </button>
+  );
+}
 
 /* ── confidence meter ─────────────────────────────────────────── */
 
@@ -115,7 +180,7 @@ export function ObjRow({ name, n, c, task, checked = true, onToggle, onHoverEnte
             fontSize: 13.5,
             color: AP.ink,
             whiteSpace: 'nowrap',
-            textDecoration: off ? 'line-through' : 'none',
+            textDecorationLine: off ? 'line-through' : 'none',
             textDecorationColor: AP.ink4,
           }}
         >
@@ -215,20 +280,154 @@ export function OutputBody({ o, detectionState }) {
   return <Muted>{o.summary || 'Output recorded.'}</Muted>;
 }
 
-// One model output as a labeled card: its type/model name in the header, its
-// payload rendered by OutputBody below.
-export function OutputCard({ o, detectionState }) {
+// The human label for one output's type — "Detections", "Caption", etc.
+// Exported so callers building their own stage chrome (StageCard) around
+// OutputBody don't need their own copy of OUTPUT_LABEL.
+export function outputLabel(o) {
+  return OUTPUT_LABEL[o.output_type] || o.output_type;
+}
+
+/* ── per-output-type glyph ────────────────────────────────────────
+   One small icon per `output_type`, so a run's stages read apart from each
+   other at a glance instead of every StageCard header looking identical.
+   Keyed on `output_type` (what a stored model output actually carries),
+   not `node_type` — a purely-transform node (resize, grayscale, embedding)
+   never produces its own model_output row, so it never reaches this list;
+   there's nothing here to give it an icon for. Unrecognized types (a future
+   output_type, or a legacy one) render with no icon rather than a guess. */
+function DetectionsIcon({ size = 13 }) {
   return (
-    <div style={{ borderRadius: 9, border: `1px solid ${AP.line2}`, background: 'rgba(255,255,255,0.02)', padding: '10px 11px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <span style={{ fontFamily: AP.sans, fontSize: 12.5, fontWeight: 600, color: AP.ink }}>
-          {OUTPUT_LABEL[o.output_type] || o.output_type}
-        </span>
-        <span style={{ fontFamily: AP.mono, fontSize: 9.5, color: AP.ink3 }}>
-          {o.model_name}{o.model_version ? ` · ${o.model_version}` : ''}
-        </span>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+function ClassificationIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M11.5 4H6.5A2.5 2.5 0 0 0 4 6.5v5c0 .66.26 1.3.73 1.77l8 8a2.5 2.5 0 0 0 3.54 0l5-5a2.5 2.5 0 0 0 0-3.54l-8-8A2.5 2.5 0 0 0 11.5 4z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <circle cx="8.7" cy="8.7" r="1.15" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+function CaptionIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path
+        d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H10l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5v-6z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+function OcrIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M6 3.5h8l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M14 3.5V8h4.5" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M8 12.5h8M8 15.5h8M8 18.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+function WrittenImageIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="8.7" cy="9.7" r="1.4" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M4.5 16.5l4.3-4.3a1.8 1.8 0 0 1 2.55 0l3.2 3.2 1.3-1.3a1.8 1.8 0 0 1 2.55 0l2.6 2.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+const OUTPUT_ICON = {
+  detections: DetectionsIcon,
+  labels: ClassificationIcon,
+  caption: CaptionIcon,
+  ocr: OcrIcon,
+  written_image: WrittenImageIcon,
+};
+
+// The glyph for one output's type, or `null` for a type with no icon defined
+// — StageCard renders fine either way. Same keying/fallback shape as
+// `outputLabel`, kept alongside it since both read the same vocabulary.
+export function outputIcon(o) {
+  const Icon = OUTPUT_ICON[o.output_type];
+  return Icon ? <Icon /> : null;
+}
+
+/* ── one numbered stage within an expanded pipeline section ──────
+   A stage's own page-visibility eye — mirrors the section-level eye at
+   finer grain, hiding just this one stage's body without touching its
+   siblings. Delete/retry stay pipeline-wide only: model outputs have no
+   per-node id yet, so there's nothing to scope either action to. `icon` is
+   optional and caller-supplied (see `outputIcon`) — StageCard itself stays
+   agnostic to what kind of stage it's chrome for. */
+export function StageCard({ index, total, name, icon, trailing, hidden = false, onToggleHidden, children }) {
+  return (
+    <div style={{ border: `1px solid ${AP.line2}`, borderRadius: 11, background: AP.card, overflow: 'hidden' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          padding: '9px 12px',
+          borderBottom: hidden ? 'none' : `1px solid ${AP.line}`,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <EyeBtn on={!hidden} onClick={onToggleHidden} size={20} />
+          {icon && (
+            <span style={{ display: 'inline-flex', color: hidden ? AP.ink3 : AP.lumenSoft, flex: '0 0 auto' }}>
+              {icon}
+            </span>
+          )}
+          {total > 1 && (
+            <span
+              style={{
+                fontFamily: AP.mono,
+                fontSize: 9.5,
+                color: AP.ink3,
+                border: `1px solid ${AP.line2}`,
+                borderRadius: 5,
+                padding: '2px 5px',
+                whiteSpace: 'nowrap',
+                flex: '0 0 auto',
+              }}
+            >
+              {index}/{total}
+            </span>
+          )}
+          <span
+            style={{
+              fontFamily: AP.sans,
+              fontSize: 12.5,
+              fontWeight: 500,
+              color: hidden ? AP.ink2 : AP.ink,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {name}
+          </span>
+        </div>
+        {trailing && (
+          <span style={{ fontFamily: AP.mono, fontSize: 10, color: AP.ink3, whiteSpace: 'nowrap', flex: '0 0 auto' }}>
+            {trailing}
+          </span>
+        )}
       </div>
-      <OutputBody o={o} detectionState={detectionState} />
+      {!hidden && <div style={{ padding: '10px 12px' }}>{children}</div>}
     </div>
   );
 }
@@ -273,92 +472,6 @@ export function StatePill({ state }) {
   );
 }
 
-// "Process" for a pair that has never produced output, "Reprocess" once it has.
-// Disabled while `busy` (an in-flight request from this client) or while `state`
-// is itself queued/processing (already running, dispatched from elsewhere).
-export function ProcessButton({ state, onClick, busy }) {
-  const inFlight = IN_FLIGHT.has(state);
-  const disabled = busy || inFlight;
-  const label = state === 'completed' ? '↻ Reprocess' : '▶ Process';
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={
-        inFlight
-          ? 'Already running — wait for it to finish'
-          : state === 'completed'
-            ? 'Re-run this pipeline — replaces its existing outputs'
-            : 'Run this pipeline against this image'
-      }
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: '4px 8px',
-        borderRadius: 7,
-        flex: '0 0 auto',
-        fontFamily: AP.sans,
-        fontSize: 11,
-        fontWeight: 500,
-        lineHeight: 1.2,
-        color: disabled ? AP.ink4 : AP.ink2,
-        background: 'rgba(255,255,255,0.03)',
-        border: `1px solid ${AP.line2}`,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.55 : 1,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {busy ? '⋯ Working' : label}
-    </button>
-  );
-}
-
-// Deletes a pipeline's stored outputs (for one image). Sits beside a visibility
-// toggle in real use because the two are easy to confuse: a toggle hides
-// outputs locally, this deletes them on the server. `disabled` when there is
-// nothing stored to delete.
-export function DeleteOutputsBtn({ onClick, busy, disabled }) {
-  const [hover, setHover] = useState(false);
-  const off = disabled || busy;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={off}
-      aria-label="Delete outputs"
-      title={
-        disabled
-          ? 'Nothing to delete — this pipeline has no stored outputs for this image'
-          : 'Delete this pipeline’s outputs for this image (it can be run again afterwards)'
-      }
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 26,
-        height: 22,
-        borderRadius: 7,
-        flex: '0 0 auto',
-        fontSize: 12,
-        lineHeight: 1,
-        cursor: off ? 'not-allowed' : 'pointer',
-        color: off ? AP.ink4 : hover ? STATUS.err.c : AP.ink3,
-        background: hover && !off ? STATUS.err.bg : 'rgba(255,255,255,0.03)',
-        border: `1px solid ${hover && !off ? STATUS.err.line : AP.line2}`,
-        opacity: off ? 0.5 : 1,
-        transition: 'all .12s',
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      {busy ? '⋯' : '🗑'}
-    </button>
-  );
-}
-
 // "stage 3/5 · captioning" — live progress inside a single run. Renders nothing
 // until the first stage of a run reports in (`stage` is null/undefined then).
 export function StageProgress({ stage }) {
@@ -371,11 +484,21 @@ export function StageProgress({ stage }) {
   );
 }
 
-// The full pipeline card: name/id header, state pill, optional "Detached"
-// badge, delete + visibility controls, a Process/Reprocess button, an inline
-// error line when failed, and — while expanded (`on`) — its outputs as
-// `children`. `section` is `{ name, id?, state, stage?, detached?, lastError?,
-// hasOutputs, model }`; `model` is a short trailing label (e.g. "3 outputs").
+// The full pipeline card: a chevron collapses the card itself down to one
+// summary row; an eye/reprocess/delete control cluster in the top-right
+// corner (eye always shown, reprocess/delete only when their handler is
+// given); an inline error line when failed; and — while expanded and shown
+// (`!collapsed && on`) — its outputs as `children`. `section` is `{ name,
+// id?, state, stage?, detached?, lastError?, hasOutputs, model }`; `model` is
+// a short trailing label (e.g. "3 outputs").
+//
+// The chevron and the eye are deliberately independent: the chevron collapses
+// the section itself (pure layout, held as local state — nothing outside this
+// card depends on it), while the eye governs what the section displays
+// on the page (`on`/`toggle` are lifted to the caller because they also drive
+// a bbox overlay elsewhere on the page). Collapsing hides everything below
+// the header regardless of the eye; expanded-but-hidden shows the header and
+// meta row but no outputs.
 export function PipelineSection({
   section,
   on,
@@ -386,6 +509,34 @@ export function PipelineSection({
   deleting,
   children,
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const running = !!processing || IN_FLIGHT.has(section.state);
+
+  const meta = (
+    <>
+      <StatePill state={section.state} />
+      {section.detached && (
+        <span
+          style={{
+            fontFamily: AP.mono,
+            fontSize: 9.5,
+            lineHeight: 1,
+            color: AP.ember,
+            background: AP.emberBg,
+            border: `1px solid ${AP.emberLine}`,
+            borderRadius: 6,
+            padding: '3px 6px',
+            whiteSpace: 'nowrap',
+          }}
+          title="This pipeline is no longer attached to the workspace — past outputs only"
+        >
+          Detached
+        </span>
+      )}
+      <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3 }}>{section.model}</span>
+    </>
+  );
+
   return (
     <div
       style={{
@@ -399,8 +550,12 @@ export function PipelineSection({
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: on ? AP.lumen : AP.ink4, flex: '0 0 auto' }}>◇</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <ChevronBtn
+              collapsed={collapsed}
+              onClick={() => setCollapsed((c) => !c)}
+              title={collapsed ? 'Expand this pipeline' : 'Collapse this pipeline'}
+            />
             <span style={{ fontFamily: AP.sans, fontSize: 14, fontWeight: 600, color: on ? AP.ink : AP.ink2 }}>
               {section.name}
             </span>
@@ -424,62 +579,61 @@ export function PipelineSection({
                 #{section.id}
               </span>
             )}
+            {collapsed && meta}
           </div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
-              flexWrap: 'wrap',
-              paddingLeft: 20,
-              marginTop: 5,
-            }}
-          >
-            <StatePill state={section.state} />
-            {section.detached && (
-              <span
-                style={{
-                  fontFamily: AP.mono,
-                  fontSize: 9.5,
-                  lineHeight: 1,
-                  color: AP.ember,
-                  background: AP.emberBg,
-                  border: `1px solid ${AP.emberLine}`,
-                  borderRadius: 6,
-                  padding: '3px 6px',
-                  whiteSpace: 'nowrap',
-                }}
-                title="This pipeline is no longer attached to the workspace — past outputs only"
-              >
-                Detached
-              </span>
-            )}
-            <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3 }}>{section.model}</span>
-            <StageProgress stage={section.stage} />
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
-          {onDelete && (
-            <DeleteOutputsBtn
-              onClick={onDelete}
-              busy={!!deleting}
-              disabled={!section.hasOutputs}
-            />
+          {!collapsed && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', paddingLeft: 20, marginTop: 5 }}>
+              {meta}
+              <StageProgress stage={section.stage} />
+            </div>
           )}
-          <Toggle on={on} onClick={toggle} />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, flex: '0 0 auto' }}>
+          <EyeBtn on={on} onClick={toggle} size={27} />
+          {onProcess && (
+            <IconBtn
+              size={27}
+              active={running}
+              spin={running}
+              disabled={running}
+              onClick={onProcess}
+              title={
+                running
+                  ? 'Already running — wait for it to finish'
+                  : section.state === 'completed'
+                    ? 'Re-run this pipeline — replaces its existing outputs'
+                    : 'Run this pipeline against this image'
+              }
+            >
+              <ReprocessIcon />
+            </IconBtn>
+          )}
+          {onDelete && (
+            <IconBtn
+              size={27}
+              tone="danger"
+              spin={!!deleting}
+              disabled={!section.hasOutputs || !!deleting}
+              onClick={onDelete}
+              title={
+                section.hasOutputs
+                  ? 'Delete this pipeline’s outputs for this image (it can be run again afterwards)'
+                  : 'Nothing to delete — this pipeline has no stored outputs for this image'
+              }
+            >
+              <TrashIcon />
+            </IconBtn>
+          )}
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 20, marginTop: 10 }}>
-        {onProcess && (
-          <ProcessButton state={section.state} onClick={onProcess} busy={!!processing} />
-        )}
-        {section.state === 'failed' && section.lastError && (
+      {!collapsed && section.state === 'failed' && section.lastError && (
+        <div style={{ paddingLeft: 20, marginTop: 8 }}>
           <span
             style={{
               fontFamily: AP.sans,
               fontSize: 11,
               color: STATUS.err.c,
-              minWidth: 0,
+              display: 'block',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -488,9 +642,9 @@ export function PipelineSection({
           >
             {section.lastError}
           </span>
-        )}
-      </div>
-      {on && <div style={{ paddingTop: 13, paddingLeft: 20 }}>{children}</div>}
+        </div>
+      )}
+      {!collapsed && on && <div style={{ paddingTop: 13, paddingLeft: 20 }}>{children}</div>}
     </div>
   );
 }

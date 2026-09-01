@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { PipelineSection, OutputCard, AP } from 'pixquery-aperture';
+import { PipelineSection, StageCard, OutputBody, outputIcon, AP } from 'pixquery-aperture';
 
 const stage: React.CSSProperties = { width: 380, background: AP.base, padding: 16 };
 
-// A completed run, expanded, showing its real outputs — a detections card and
-// a caption card, exactly as ImageDetails.js composes them as `children`.
+// A completed run, expanded, showing its real outputs as numbered stages —
+// exactly as ImageDetails.js composes them as `children`. The eye/reprocess/
+// delete cluster replaces the old switch + text button + emoji trash: one
+// shape, three jobs, colour is the only thing that separates them.
 export const CompletedExpanded = () => {
   const [on, setOn] = useState(true);
   return (
@@ -17,25 +19,29 @@ export const CompletedExpanded = () => {
         onDelete={() => {}}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-          <OutputCard
-            o={{
-              output_type: 'detections',
-              model_name: 'yolo',
-              model_version: 'v8n',
-              payload: { detections: [{ label: 'car', confidence: 0.89 }, { label: 'person', confidence: 0.85 }] },
-            }}
-          />
-          <OutputCard
-            o={{ output_type: 'caption', model_name: 'blip', model_version: 'base', payload: { text: 'A busy street with cars and pedestrians.' } }}
-          />
+          {(() => {
+            const detections = { output_type: 'detections', model_name: 'yolo', payload: { detections: [{ label: 'car', confidence: 0.89 }, { label: 'person', confidence: 0.85 }] } };
+            const caption = { output_type: 'caption', model_name: 'blip', payload: { text: 'A busy street with cars and pedestrians.' } };
+            return (
+              <>
+                <StageCard index={1} total={2} name="Detections" icon={outputIcon(detections)} trailing="yolo · v8n">
+                  <OutputBody o={detections} />
+                </StageCard>
+                <StageCard index={2} total={2} name="Caption" icon={outputIcon(caption)} trailing="blip · base">
+                  <OutputBody o={caption} />
+                </StageCard>
+              </>
+            );
+          })()}
         </div>
       </PipelineSection>
     </div>
   );
 };
 
-// Never run: collapsed, no outputs yet, the Process button is the only action.
-export const NotStartedCollapsed = () => {
+// Never run: the eye/reprocess cluster is the only way to trigger the
+// pipeline at all — no separate Process button.
+export const NotStarted = () => {
   const [on, setOn] = useState(false);
   return (
     <div style={stage}>
@@ -51,8 +57,9 @@ export const NotStartedCollapsed = () => {
   );
 };
 
-// A run in progress reports its stage — "stage 2/3 · captioning" — live progress
-// inside a single dispatch, distinct from the outer Queued/Processing state.
+// A run in progress reports its stage — "stage 2/3 · captioning" — live
+// progress inside a single dispatch. The reprocess control spins and locks
+// while running, replacing the old disabled "⋯ Working" text button.
 export const ProcessingWithStage = () => (
   <div style={stage}>
     <PipelineSection
@@ -65,6 +72,7 @@ export const ProcessingWithStage = () => (
       }}
       on={false}
       toggle={() => {}}
+      onProcess={() => {}}
       processing
       onDelete={() => {}}
       deleting={false}
@@ -94,8 +102,9 @@ export const Failed = () => (
   </div>
 );
 
-// A pipeline no longer attached to the workspace: read-only history, its
-// outputs can still be viewed or cleared but not re-run.
+// A pipeline no longer attached to the workspace: reprocess disappears
+// entirely (a two-control cluster) — the eye stays, so history is still
+// readable, and delete stays enabled while outputs exist.
 export const Detached = () => (
   <div style={stage}>
     <PipelineSection
@@ -104,9 +113,15 @@ export const Detached = () => (
       toggle={() => {}}
       onDelete={() => {}}
     >
-      <OutputCard
-        o={{ output_type: 'labels', model_name: 'resnet', model_version: 'v1', payload: { labels: [{ label: 'outdoor', confidence: 0.91 }] } }}
-      />
+      <StageCard
+        index={1}
+        total={1}
+        name="Classification"
+        icon={outputIcon({ output_type: 'labels' })}
+        trailing="resnet · v1"
+      >
+        <OutputBody o={{ output_type: 'labels', model_name: 'resnet', payload: { labels: [{ label: 'outdoor', confidence: 0.91 }] } }} />
+      </StageCard>
     </PipelineSection>
   </div>
 );
