@@ -2,8 +2,9 @@
 
 __all__ = [
     "api",
+    "config",
+    "consumer",
     "infrastructure",
-    "pipelines",
     "repositories",
     "services",
 ]

@@ -7,9 +7,10 @@ workspace.
 import asyncio
 import unittest
 
-from src.repositories import InMemoryPipelineRepository
-from src.services.job_service import JobConflictError, JobService
-from src.services.workspace_service import WorkspaceAccessError
+from src.errors.jobs import JobConflictError
+from src.errors.workspaces import WorkspaceAccessError
+from src.services.job_service import JobService
+from tests.repo_factory import new_repos
 
 
 class _FakePublisher:
@@ -40,19 +41,22 @@ class RetriggerPipelineTests(unittest.TestCase):
     def setUp(self):
         _FakePublisher.published = []
         _FakePublisher.instances = []
-        self.repo = InMemoryPipelineRepository()
-        self.service = JobService(self.repo, publisher_factory=_FakePublisher)
+        self.r = new_repos()
+        self.service = JobService(
+            jobs=self.r.jobs, assets=self.r.assets, workspaces=self.r.workspaces, pipelines=self.r.pipelines,
+            publisher_factory=_FakePublisher,
+        )
 
-        self.pipeline = self.repo.create_pipeline(
+        self.pipeline = self.r.pipelines.create(
             owner_id="owner-1", name="P",
             nodes=[{"node_id": "n0", "pipeline_node_id": "pn0", "config_overrides": {}}],
         )
-        self.unattached = self.repo.create_pipeline(owner_id="owner-1", name="Other", nodes=[])
-        self.ws = self.repo.create_workspace(
+        self.unattached = self.r.pipelines.create(owner_id="owner-1", name="Other", nodes=[])
+        self.ws = self.r.workspaces.create(
             owner_id="owner-1", name="W", workspace_path="/w",
             pipeline_ids=[self.pipeline["_id"]],
         )
-        self.asset = self.repo.upsert_asset(
+        self.asset = self.r.assets.upsert(
             content_sha256="h", mime_type="image/jpeg", size_bytes=1,
             current_path="/w/a.jpg", workspace_id=self.ws["_id"],
         )
@@ -71,13 +75,13 @@ class RetriggerPipelineTests(unittest.TestCase):
         self.assertEqual(_FakePublisher.published, [job["_id"]])
 
     def test_editor_is_allowed(self):
-        self.repo.update_workspace(
+        self.r.workspaces.update(
             self.ws["_id"], {"members": [{"user_id": "editor-1", "role": "editor"}]}
         )
         self.assertIsNotNone(self._retrigger(user_id="editor-1"))
 
     def test_viewer_is_denied(self):
-        self.repo.update_workspace(
+        self.r.workspaces.update(
             self.ws["_id"], {"members": [{"user_id": "viewer-1", "role": "viewer"}]}
         )
         with self.assertRaises(WorkspaceAccessError):
@@ -103,14 +107,14 @@ class RetriggerPipelineTests(unittest.TestCase):
 
     def test_click_while_processing_is_rejected(self):
         job = self._retrigger()
-        self.repo.start_job(job["_id"])  # worker picked it up
+        self.r.jobs.start(job["_id"])  # worker picked it up
         with self.assertRaises(JobConflictError):
             self._retrigger()
 
     def test_completed_job_can_be_retriggered(self):
         job = self._retrigger()
-        run = self.repo.start_job(job["_id"])
-        self.repo.complete_job(job["_id"], run["pipeline_run_id"])
+        self.r.jobs.start(job["_id"])
+        self.r.jobs.complete(job["_id"])
         _FakePublisher.published = []
 
         again = self._retrigger()

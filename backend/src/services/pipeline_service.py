@@ -3,29 +3,51 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from src.domain_events import outputs_cleared_event
+from src.errors.graph import GraphCycleError, UnknownNodeError
+from src.errors.pipelines import PipelineValidationError
+from src.infrastructure.messaging import EventSink
+from src.repositories.model_outputs_repository import ModelOutputsRepository
+from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
+from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
+from src.repositories.pipeline_runs_repository import PipelineRunsRepository
+from src.repositories.processing_jobs_repository import ProcessingJobsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
-
-
-class PipelineValidationError(ValueError):
-    """Raised when a pipeline graph is malformed (bad edge ref or a cycle)."""
+from src.utils.graph import topological_order
 
 
 class PipelineService:
-    def __init__(self, repository):
-        self.repository = repository
+    def __init__(
+        self,
+        *,
+        pipelines: PipelineDefinitionsRepository,
+        nodes: PipelineNodesRepository,
+        runs: PipelineRunsRepository,
+        outputs: ModelOutputsRepository,
+        jobs: ProcessingJobsRepository,
+        workspaces: WorkspaceDefinitionsRepository,
+        event_sink: EventSink | None = None,
+    ):
+        self.pipelines = pipelines
+        self.nodes = nodes
+        self.runs = runs
+        self.outputs = outputs
+        self.jobs = jobs
+        self.workspaces = workspaces
+        self.event_sink = event_sink
 
     # ── Pipeline Node Library ─────────────────────────────────────
 
     def list_pipeline_nodes(self, *, owner_id: str) -> list[dict[str, Any]]:
-        nodes = self.repository.list_pipeline_nodes(owner_id=owner_id)
-        return serialize_documents(nodes)
+        return serialize_documents(self.nodes.list_all(owner_id=owner_id))
 
     def get_pipeline_node(self, node_id: str) -> dict[str, Any] | None:
-        node = self.repository.get_pipeline_node(node_id)
+        node = self.nodes.get(node_id)
         return serialize_document(node) if node else None
 
     def create_pipeline_node(self, *, owner_id: str, data: dict[str, Any]) -> dict[str, Any]:
-        node = self.repository.create_pipeline_node(
+        node = self.nodes.create(
             name=data["name"],
             description=data.get("description", ""),
             node_type=data["node_type"],
@@ -40,41 +62,40 @@ class PipelineService:
     def update_pipeline_node(
         self, node_id: str, *, owner_id: str, data: dict[str, Any]
     ) -> dict[str, Any] | None:
-        existing = self.repository.get_pipeline_node(node_id)
+        existing = self.nodes.get(node_id)
         if not existing:
             return None
         if existing.get("owner_id") == "system":
             return None  # system nodes are immutable
         if existing.get("owner_id") != owner_id:
             return None
-        updated = self.repository.update_pipeline_node(node_id, data)
+        updated = self.nodes.update(node_id, data)
         return serialize_document(updated) if updated else None
 
     def delete_pipeline_node(self, node_id: str, *, owner_id: str) -> bool:
-        existing = self.repository.get_pipeline_node(node_id)
+        existing = self.nodes.get(node_id)
         if not existing:
             return False
         if existing.get("owner_id") in ("system", None):
             return False
         if existing.get("owner_id") != owner_id:
             return False
-        return self.repository.delete_pipeline_node(node_id)
+        return self.nodes.delete(node_id)
 
     # ── Pipeline Definitions ──────────────────────────────────────
 
     def list_pipelines(self, *, owner_id: str) -> list[dict[str, Any]]:
-        pipelines = self.repository.list_pipelines(owner_id=owner_id)
-        return serialize_documents(pipelines)
+        return serialize_documents(self.pipelines.list_for_owner(owner_id))
 
     def get_pipeline(self, pipeline_id: str, *, owner_id: str) -> dict[str, Any] | None:
-        pipeline = self.repository.get_pipeline(pipeline_id)
+        pipeline = self.pipelines.get(pipeline_id)
         if not pipeline or pipeline.get("owner_id") != owner_id:
             return None
         return serialize_document(pipeline)
 
     def create_pipeline(self, *, owner_id: str, data: dict[str, Any]) -> dict[str, Any]:
         nodes, edges = _build_graph(data.get("nodes", []), data.get("edges"))
-        pipeline = self.repository.create_pipeline(
+        pipeline = self.pipelines.create(
             owner_id=owner_id,
             name=data["name"],
             description=data.get("description", ""),
@@ -86,7 +107,7 @@ class PipelineService:
     def update_pipeline(
         self, pipeline_id: str, *, owner_id: str, data: dict[str, Any]
     ) -> dict[str, Any] | None:
-        existing = self.repository.get_pipeline(pipeline_id)
+        existing = self.pipelines.get(pipeline_id)
         if not existing or existing.get("owner_id") != owner_id:
             return None
         updates: dict[str, Any] = {}
@@ -98,14 +119,51 @@ class PipelineService:
             updates["nodes"], updates["edges"] = _build_graph(
                 data["nodes"], data.get("edges")
             )
-        updated = self.repository.update_pipeline(pipeline_id, updates)
+        updated = self.pipelines.update(pipeline_id, updates)
         return serialize_document(updated) if updated else None
 
     def delete_pipeline(self, pipeline_id: str, *, owner_id: str) -> bool:
-        existing = self.repository.get_pipeline(pipeline_id)
+        """Delete a pipeline and everything downstream of it.
+
+        Cascade, mirroring ``WorkspaceService.delete_workspace``: the pipeline's
+        runs, jobs and model outputs go with it (across every workspace), and the
+        id is pulled from any workspace still referencing it — a dangling id would
+        otherwise make the reconciler keep minting jobs for a pipeline that no
+        longer exists. Assets and the shared pipeline-node library are untouched:
+        the images themselves outlive any one pipeline.
+        """
+        existing = self.pipelines.get(pipeline_id)
         if not existing or existing.get("owner_id") != owner_id:
             return False
-        return self.repository.delete_pipeline(pipeline_id)
+
+        run_ids = [r["_id"] for r in self.runs.list_for_pipeline(pipeline_id)]
+
+        # Outputs carry a denormalized pipeline_id, but older rows may not — also
+        # sweep anything tied to this pipeline's runs so nothing is orphaned.
+        self.outputs.delete_for_pipeline(pipeline_id)
+        self.outputs.delete_for_runs(run_ids)
+        self.runs.delete_for_pipeline(pipeline_id)
+        self.jobs.delete_for_pipeline(pipeline_id)
+
+        affected_workspaces = [
+            ws["_id"] for ws in self.workspaces.list_referencing_pipeline(pipeline_id)
+        ]
+        for workspace_id in affected_workspaces:
+            self.workspaces.remove_pipeline_id(workspace_id, pipeline_id)
+
+        deleted = self.pipelines.delete(pipeline_id)
+        if deleted and self.event_sink is not None:
+            # One event per affected workspace: any image detail view open on that
+            # workspace drops the section instead of showing outputs that are gone.
+            for workspace_id in affected_workspaces:
+                self.event_sink.emit(
+                    outputs_cleared_event(
+                        workspace_id=workspace_id,
+                        pipeline_id=pipeline_id,
+                        counts={"pipeline_deleted": 1},
+                    )
+                )
+        return deleted
 
 
 def _build_graph(
@@ -165,20 +223,14 @@ def _build_graph(
 
 
 def _assert_acyclic(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> None:
-    """Kahn's algorithm: if we can't consume every node, there's a cycle."""
-    indegree = {n["node_id"]: 0 for n in nodes}
-    adjacency: dict[str, list[str]] = {n["node_id"]: [] for n in nodes}
-    for edge in edges:
-        adjacency[edge["from_node_id"]].append(edge["to_node_id"])
-        indegree[edge["to_node_id"]] += 1
-    queue = [nid for nid, deg in indegree.items() if deg == 0]
-    consumed = 0
-    while queue:
-        nid = queue.pop()
-        consumed += 1
-        for nxt in adjacency[nid]:
-            indegree[nxt] -= 1
-            if indegree[nxt] == 0:
-                queue.append(nxt)
-    if consumed != len(nodes):
-        raise PipelineValidationError("Pipeline graph has a cycle.")
+    """Reject a graph that can't be topologically ordered.
+
+    Edge refs are already validated by ``_build_graph`` before this runs, so in
+    practice only ``GraphCycleError`` is reachable here — ``UnknownNodeError``
+    is caught too, defensively, rather than letting a generic exception leak
+    out of the service layer.
+    """
+    try:
+        topological_order((n["node_id"] for n in nodes), edges)
+    except (GraphCycleError, UnknownNodeError) as exc:
+        raise PipelineValidationError("Pipeline graph has a cycle.") from exc

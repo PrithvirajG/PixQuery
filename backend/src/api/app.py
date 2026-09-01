@@ -52,23 +52,30 @@ async def _start_event_bus() -> None:
     Deleting outputs or hitting Reprocess changes state just as much as the worker
     does; without this the acting tab would update while every other open tab sat
     stale until its next refetch.
+
+    Every API-process service emits through the shared ``EventSink`` (see
+    dependencies.py's ``get_event_sink()``), so only that one needs arming here.
+    The worker and monitor processes each hold and arm their own ``EventSink``
+    the same way — see ``consumer/processing/image_task_consumer.py`` and
+    ``consumer/ingestion/worker.py``.
     """
     if not EVENTS_ENABLED:
         return
-    from src.api.dependencies import get_pipeline_repository
-    from src.infrastructure.messaging import EventBus
+    from src.api.dependencies import get_event_sink
+    from src.publisher.events import EventPublisher
 
     try:
-        bus = await EventBus().start()
+        bus = EventPublisher()
+        await bus.connect()
     except Exception as exc:
         logger.warning("Live events disabled in API: %s", exc)
         return
     _state["event_bus"] = bus
-    get_pipeline_repository().set_event_sink(bus.emit)
+    get_event_sink().set(bus.emit)
 
 
 async def _stop_event_bus() -> None:
-    from src.api.routes.websocket import reset_subscriber
+    from src.api.routes.ws.events_socket import reset_subscriber
 
     bus = _state.pop("event_bus", None)
     if bus:

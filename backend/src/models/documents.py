@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+from src.utils.time import utcnow
 
 
 def _new_id() -> str:

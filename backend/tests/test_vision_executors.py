@@ -8,8 +8,8 @@ import unittest
 
 from PIL import Image
 
-from src.pipelines.processing.executors import get_executor
-from src.pipelines.processing.executors.builtin import FaceDetectionExecutor
+from src.services.executors import get_executor
+from src.services.executors.builtin import FaceDetectionExecutor
 
 
 class FaceDetectionExecutorTests(unittest.TestCase):

@@ -12,10 +12,10 @@ from pathlib import Path
 from PIL import Image
 
 from src.config import PIPELINE_OUTPUT_DIRNAME
-from src.pipelines.ingestion import FilesystemReconciler
-from src.pipelines.processing.executors import get_executor
-from src.pipelines.processing.executors.builtin import ImageWriteExecutor
-from src.repositories import InMemoryPipelineRepository
+from src.services.reconciliation_service import ReconciliationService
+from src.services.executors import get_executor
+from src.services.executors.builtin import ImageWriteExecutor
+from tests.repo_factory import new_repos
 
 
 class ImageWriteExecutorTests(unittest.TestCase):
@@ -81,8 +81,9 @@ class ReconcilerSkipsOutputFolderTests(unittest.IsolatedAsyncioTestCase):
             out_dir.mkdir()
             Image.new("RGB", (8, 8), "blue").save(out_dir / "source.jpg")
 
-            reconciler = FilesystemReconciler(
-                repository=InMemoryPipelineRepository(),
+            r = new_repos()
+            reconciler = ReconciliationService(
+                assets=r.assets, observations=r.observations, jobs=r.jobs, pipelines=r.pipelines,
                 publisher=None,
                 workspace_path=str(root),
                 workspace_id="ws-1",

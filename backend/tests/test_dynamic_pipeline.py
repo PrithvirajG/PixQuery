@@ -5,13 +5,15 @@ loading are faked, so no model weights, numpy, or PIL are required.
 """
 import unittest
 
-from src.pipelines.processing.executors import (
+from src.domain_events import EVENT_PIPELINE_STATE
+from src.infrastructure.messaging import EventSink
+from src.services.executors import (
     NodeExecutionError,
     PermanentNodeError,
     get_executor,
 )
-from src.pipelines.processing.pipeline import DynamicPipeline
-from src.repositories import InMemoryPipelineRepository
+from src.services.pipeline_execution_service import PipelineExecutionService
+from tests.repo_factory import new_repos
 
 
 class FakeExecutor:
@@ -67,15 +69,15 @@ class RegistryTests(unittest.TestCase):
 
 class DynamicPipelineTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
+        self.r = new_repos()
         self.recorder = []
         self.store = FakeEmbeddingStore()
         # System nodes are seeded by the repository; map node_type -> id.
         self.node_ids = {
             n["node_type"]: n["_id"]
-            for n in self.repo.list_pipeline_nodes(owner_id="owner-1")
+            for n in self.r.nodes.list_all(owner_id="owner-1")
         }
-        self.asset = self.repo.upsert_asset(
+        self.asset = self.r.assets.upsert(
             content_sha256="hash-1",
             mime_type="image/jpeg",
             size_bytes=10,
@@ -83,7 +85,9 @@ class DynamicPipelineTests(unittest.TestCase):
         )
 
     def _pipeline(self, outputs_by_type):
-        return DynamicPipeline(
+        return PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes,
             embedding_store=self.store,
             get_executor=make_get_executor(outputs_by_type, self.recorder),
             image_loader=lambda asset: "FAKE_IMAGE",
@@ -99,10 +103,10 @@ class DynamicPipelineTests(unittest.TestCase):
             }
             for i, nt in enumerate(node_types)
         ]
-        return self.repo.create_pipeline(owner_id="owner-1", name="P", nodes=nodes)
+        return self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
 
     def _job_for(self, pipeline_id, version="v-test"):
-        job, _ = self.repo.ensure_processing_job(
+        job, _ = self.r.jobs.get_or_create(
             asset_id=self.asset["_id"],
             pipeline_id=pipeline_id,
             pipeline_version=version,
@@ -118,15 +122,15 @@ class DynamicPipelineTests(unittest.TestCase):
             "captioning": {"caption": "a cat"},
             "embedding": {"embeddings": [3.0, 4.0], "text_embedding": [0.0, 5.0]},
         }
-        self._pipeline(outputs).run_job(self.repo, job["_id"])
+        self._pipeline(outputs).run_job(job["_id"])
 
         # Nodes ran in declared order.
         self.assertEqual([nt for nt, _ in self.recorder],
                          ["object_detection", "captioning", "embedding"])
         # Job completed.
-        self.assertEqual(self.repo.get_job(job["_id"])["status"], "completed")
+        self.assertEqual(self.r.jobs.get(job["_id"])["status"], "completed")
 
-        stored = list(self.repo.model_outputs.find({"asset_id": self.asset["_id"]}))
+        stored = list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]}))
         by_type = {o["output_type"]: o for o in stored}
         # Caption + detections persisted in their historical shapes.
         self.assertEqual(by_type["caption"]["payload"], {"text": "a cat"})
@@ -145,7 +149,7 @@ class DynamicPipelineTests(unittest.TestCase):
             "captioning": {"caption": "hello"},
             "embedding": {"embeddings": [3.0, 4.0], "text_embedding": [0.0, 2.0]},
         }
-        self._pipeline(outputs).run_job(self.repo, job["_id"])
+        self._pipeline(outputs).run_job(job["_id"])
 
         self.assertEqual(len(self.store.image_upserts), 1)
         vector, props = self.store.image_upserts[0]
@@ -164,35 +168,130 @@ class DynamicPipelineTests(unittest.TestCase):
             "captioning": {"caption": "x"},
             "embedding": {"embeddings": [1.0]},
         }
-        self._pipeline(outputs).run_job(self.repo, job["_id"])
+        self._pipeline(outputs).run_job(job["_id"])
 
         self.assertEqual([nt for nt, _ in self.recorder],
                          ["object_detection", "captioning", "embedding"])
-        self.assertEqual(self.repo.get_job(job["_id"])["status"], "completed")
+        self.assertEqual(self.r.jobs.get(job["_id"])["status"], "completed")
 
     def test_missing_required_input_fails_job(self):
         # A node that needs a "detections" input, run first (nothing produced it),
         # must fail clearly rather than silently skip.
-        node = self.repo.create_pipeline_node(
+        node = self.r.nodes.create(
             name="Needs Detections", description="", node_type="needs_detections",
             context_inputs=["detections"], context_outputs=["image"],
             config_schema={}, default_config={}, owner_id="owner-1",
         )
         nodes = [{"node_id": "n0", "pipeline_node_id": node["_id"],
                   "order": 0, "config_overrides": {}}]
-        definition = self.repo.create_pipeline(owner_id="owner-1", name="P", nodes=nodes)
+        definition = self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
         job = self._job_for(definition["_id"])
 
         pipeline = self._pipeline({"needs_detections": {"image": "X"}})
         with self.assertRaises(PermanentNodeError):
-            pipeline.run_job(self.repo, job["_id"])
+            pipeline.run_job(job["_id"])
 
         # A missing required input is a config error — it can never succeed on
         # retry, so the job is failed outright (not requeued) with the cause.
-        failed_job = self.repo.get_job(job["_id"])
+        failed_job = self.r.jobs.get(job["_id"])
         self.assertEqual(failed_job["status"], "failed")
         self.assertIsNone(failed_job["next_attempt_at"])
         self.assertIn("detections", failed_job["last_error"]["message"])
+
+    def test_transient_failure_retries_three_times_then_marks_failed(self):
+        # Mirrors the old god-repository's ProcessingRetryTests, now against
+        # PipelineExecutionService's own retry policy (RETRY_DELAYS/MAX_ATTEMPTS)
+        # rather than the repository's.
+        definition = self._make_definition(["object_detection"])
+        job = self._job_for(definition["_id"])
+
+        class AlwaysFails:
+            node_type = "object_detection"
+            model_name = "m"
+            model_version = "v"
+
+            def run(self, context, config):
+                raise RuntimeError("transient boom")
+
+        pipeline = PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes,
+            get_executor=lambda nt: AlwaysFails(),
+            image_loader=lambda asset: "FAKE_IMAGE",
+        )
+
+        statuses = []
+        for _ in range(3):
+            with self.assertRaises(RuntimeError):
+                pipeline.run_job(job["_id"])
+            statuses.append(self.r.jobs.get(job["_id"])["status"])
+
+        self.assertEqual(statuses, ["queued", "queued", "failed"])
+        final = self.r.jobs.get(job["_id"])
+        self.assertEqual(final["attempt_count"], 3)
+        self.assertIsNone(final["next_attempt_at"])
+        self.assertEqual(final["last_error"]["message"], "transient boom")
+
+    def test_retryable_failure_emits_queued_not_failed(self):
+        # Mirrors test_events.py's old JobLifecycleEventTests coverage of the
+        # god-repository's fail_job emission, now against
+        # PipelineExecutionService's own _emit_state.
+        definition = self._make_definition(["object_detection"])
+        job = self._job_for(definition["_id"])
+
+        class Fails:
+            node_type = "object_detection"
+            model_name = "m"
+            model_version = "v"
+
+            def run(self, context, config):
+                raise RuntimeError("boom")
+
+        events = []
+        sink = EventSink()
+        sink.set(events.append)
+        pipeline = PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes,
+            get_executor=lambda nt: Fails(),
+            image_loader=lambda asset: "FAKE_IMAGE",
+            event_sink=sink,
+        )
+
+        with self.assertRaises(RuntimeError):
+            pipeline.run_job(job["_id"])
+
+        states = [e.data["state"] for e in events if e.type == EVENT_PIPELINE_STATE]
+        # processing (job start), then queued (retry pending) — not failed.
+        self.assertEqual(states, ["processing", "queued"])
+
+    def test_permanent_failure_emits_failed_with_the_message(self):
+        node = self.r.nodes.create(
+            name="Needs Detections", description="", node_type="needs_detections",
+            context_inputs=["detections"], context_outputs=["image"],
+            config_schema={}, default_config={}, owner_id="owner-1",
+        )
+        nodes = [{"node_id": "n0", "pipeline_node_id": node["_id"], "order": 0, "config_overrides": {}}]
+        definition = self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
+        job = self._job_for(definition["_id"])
+
+        events = []
+        sink = EventSink()
+        sink.set(events.append)
+        pipeline = PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes,
+            get_executor=lambda nt: FakeExecutor(nt, {}, self.recorder),
+            image_loader=lambda asset: "FAKE_IMAGE",
+            event_sink=sink,
+        )
+
+        with self.assertRaises(PermanentNodeError):
+            pipeline.run_job(job["_id"])
+
+        state_events = [e for e in events if e.type == EVENT_PIPELINE_STATE]
+        self.assertEqual(state_events[-1].data["state"], "failed")
+        self.assertIn("detections", state_events[-1].data["error"]["message"])
 
     def test_config_overrides_merge_over_node_defaults(self):
         nodes = [
@@ -203,10 +302,10 @@ class DynamicPipelineTests(unittest.TestCase):
                 "config_overrides": {"threshold": 0.9},
             }
         ]
-        definition = self.repo.create_pipeline(owner_id="owner-1", name="P", nodes=nodes)
+        definition = self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
         job = self._job_for(definition["_id"])
 
-        self._pipeline({"object_detection": {"detections": []}}).run_job(self.repo, job["_id"])
+        self._pipeline({"object_detection": {"detections": []}}).run_job(job["_id"])
 
         _, config = self.recorder[0]
         # default model from the seeded node + overridden threshold.

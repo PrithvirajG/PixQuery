@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from src.models import utcnow
+from src.utils.time import utcnow
 
 logger = logging.getLogger("migrations")
 
@@ -32,30 +32,32 @@ class Migration:
 def _baseline(db: Any) -> None:
     """Establish the current schema: indexes + seeded system nodes.
 
-    Delegates to the repository so the index definitions live in exactly one place
-    (``MongoPipelineRepository.ensure_indexes``); both are idempotent. The seed set
-    and the partial-unique index on system ``node_type`` mean a fresh DB comes up
-    correct with no follow-up cleanup migrations.
+    The seed set and the partial-unique index on system ``node_type`` mean a
+    fresh DB comes up correct with no follow-up cleanup migrations.
     """
-    from src.repositories.mongo_pipeline import MongoPipelineRepository
+    from src.repositories.bootstrap import ensure_schema
 
-    MongoPipelineRepository(db)  # __init__ → ensure_indexes() + _seed_system_nodes()
+    ensure_schema(db)
 
 
 def _resync_system_nodes(db: Any) -> None:
     """Refresh system nodes that were frozen at their original seed.
 
-    ``_seed_system_nodes`` used ``$setOnInsert`` for every field, so a node seeded
+    ``seed_system_nodes`` used ``$setOnInsert`` for every field, so a node seeded
     by an older build kept that build's schema forever. Face Detection was left
     advertising ``min_confidence`` (a YOLO knob its executor never reads) and
     declaring a ``faces`` output port while the executor emits ``detections`` —
     so the pipeline editor showed a control that did nothing and hid the three
-    that work. Seeding now ``$set``s the code-owned fields, and constructing the
-    repository re-applies them to existing rows.
-    """
-    from src.repositories.mongo_pipeline import MongoPipelineRepository
+    that work. Seeding now ``$set``s the code-owned fields, so re-running it
+    re-applies them to existing rows.
 
-    MongoPipelineRepository(db)
+    Identical effect to ``_baseline`` — both just call the same idempotent
+    ``ensure_schema`` — kept as separate migration ids since they were recorded
+    separately in ``schema_migrations`` on already-deployed databases.
+    """
+    from src.repositories.bootstrap import ensure_schema
+
+    ensure_schema(db)
 
 
 # Ordered list of all migrations. Append-only.

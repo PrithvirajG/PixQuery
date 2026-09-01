@@ -1,6 +1,6 @@
 import asyncio
 
-from src.pipelines.ingestion import start_monitoring
+from src.consumer.ingestion import start_monitoring
 
 
 if __name__ == "__main__":

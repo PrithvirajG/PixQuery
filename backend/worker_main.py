@@ -1,6 +1,6 @@
 import asyncio
 
-from src.pipelines.processing import start_worker
+from src.consumer.processing import start_worker
 
 
 if __name__ == "__main__":

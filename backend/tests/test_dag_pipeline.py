@@ -4,14 +4,14 @@ Orchestration only — executors are faked, so no model weights or PIL are neede
 """
 import unittest
 
-from src.pipelines.processing.executors import NodeExecutionError
-from src.pipelines.processing.pipeline import DynamicPipeline
-from src.repositories import InMemoryPipelineRepository
+from src.services.executors import NodeExecutionError
+from src.services.pipeline_execution_service import PipelineExecutionService
 from src.services.pipeline_service import (
     PipelineValidationError,
     _assert_acyclic,
     _build_graph,
 )
+from tests.repo_factory import new_repos
 
 
 class FakeExec:
@@ -76,28 +76,33 @@ class BuildGraphTests(unittest.TestCase):
 
 class DagExecutionTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
-        self.asset = self.repo.upsert_asset(
+        self.r = new_repos()
+        self.asset = self.r.assets.upsert(
             content_sha256="h", mime_type="image/jpeg", size_bytes=1, current_path="/x.jpg"
         )
 
     def _node(self, node_type, inputs, outputs):
-        return self.repo.create_pipeline_node(
+        return self.r.nodes.create(
             name=node_type, description="", node_type=node_type,
             context_inputs=inputs, context_outputs=outputs,
             config_schema={}, default_config={}, owner_id="o",
         )
 
+    def _service(self, table):
+        return PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes,
+            get_executor=get_executor_from(table), image_loader=lambda a: "IMG",
+        )
+
     def _run(self, pipeline_id, table):
-        job, _ = self.repo.ensure_processing_job(
+        job, _ = self.r.jobs.get_or_create(
             asset_id=self.asset["_id"], pipeline_id=pipeline_id, pipeline_version="v"
         )
-        DynamicPipeline(
-            get_executor=get_executor_from(table), image_loader=lambda a: "IMG"
-        ).run_job(self.repo, job["_id"])
+        self._service(table).run_job(job["_id"])
         return {
             o["output_type"]: o["payload"]
-            for o in self.repo.model_outputs.find({"asset_id": self.asset["_id"]})
+            for o in self.r.outputs.collection.find({"asset_id": self.asset["_id"]})
         }
 
     def test_branches_do_not_clobber_each_other(self):
@@ -119,7 +124,7 @@ class DagExecutionTests(unittest.TestCase):
             {"from_node_id": "B", "to_node_id": "SB"},
             {"from_node_id": "C", "to_node_id": "SC"},
         ]
-        pl = self.repo.create_pipeline(owner_id="o", name="dag", nodes=nodes, edges=edges)
+        pl = self.r.pipelines.create(owner_id="o", name="dag", nodes=nodes, edges=edges)
         table = {
             "tagA": FakeExec("tagA", lambda ctx, cfg: {"image": ctx["image"] + "|A"}),
             "tagB": FakeExec("tagB", lambda ctx, cfg: {"image": ctx["image"] + "|B"}),
@@ -145,7 +150,7 @@ class DagExecutionTests(unittest.TestCase):
             {"from_node_id": "P", "to_node_id": "M", "from_output": "valP", "to_input": "a"},
             {"from_node_id": "Q", "to_node_id": "M", "from_output": "valQ", "to_input": "b"},
         ]
-        pl = self.repo.create_pipeline(owner_id="o", name="fanin", nodes=nodes, edges=edges)
+        pl = self.r.pipelines.create(owner_id="o", name="fanin", nodes=nodes, edges=edges)
         table = {
             "prodP": FakeExec("prodP", lambda ctx, cfg: {"valP": "P"}),
             "prodQ": FakeExec("prodQ", lambda ctx, cfg: {"valQ": "Q"}),
@@ -166,16 +171,14 @@ class DagExecutionTests(unittest.TestCase):
             {"from_node_id": "A", "to_node_id": "B"},
             {"from_node_id": "B", "to_node_id": "A"},
         ]
-        pl = self.repo.create_pipeline(owner_id="o", name="cyclic", nodes=nodes, edges=edges)
-        job, _ = self.repo.ensure_processing_job(
+        pl = self.r.pipelines.create(owner_id="o", name="cyclic", nodes=nodes, edges=edges)
+        job, _ = self.r.jobs.get_or_create(
             asset_id=self.asset["_id"], pipeline_id=pl["_id"], pipeline_version="v"
         )
         table = {"noop": FakeExec("noop", lambda ctx, cfg: {"image": ctx["image"]})}
         with self.assertRaises(NodeExecutionError):
-            DynamicPipeline(
-                get_executor=get_executor_from(table), image_loader=lambda a: "IMG"
-            ).run_job(self.repo, job["_id"])
-        self.assertNotEqual(self.repo.get_job(job["_id"])["status"], "completed")
+            self._service(table).run_job(job["_id"])
+        self.assertNotEqual(self.r.jobs.get(job["_id"])["status"], "completed")
 
 
 if __name__ == "__main__":

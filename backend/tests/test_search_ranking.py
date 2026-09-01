@@ -2,8 +2,8 @@
 import unittest
 from unittest import mock
 
-from src.repositories import InMemoryPipelineRepository
 from src.services.search_service import SearchService, _reciprocal_rank_fusion
+from tests.repo_factory import new_repos
 
 
 def doc(_id, description="", score=None):
@@ -46,16 +46,19 @@ class SemanticFallbackTests(unittest.TestCase):
     """When CLIP can't be loaded, semantic search degrades to keyword search."""
 
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
-        self.search = SearchService(self.repo)
-        asset = self.repo.upsert_asset(
+        self.r = new_repos()
+        self.search = SearchService(
+            assets=self.r.assets, observations=self.r.observations,
+            workspaces=self.r.workspaces, outputs=self.r.outputs,
+        )
+        asset = self.r.assets.upsert(
             content_sha256="h1",
             mime_type="image/jpeg",
             size_bytes=5,
             current_path="/photos/cat.jpg",
         )
         self.asset_id = asset["_id"]
-        self.repo.add_model_output(
+        self.r.outputs.add(
             asset_id=asset["_id"],
             pipeline_run_id="run-1",
             model_name="blip",
@@ -72,7 +75,7 @@ class SemanticFallbackTests(unittest.TestCase):
         # return a real embedding and this test would be asserting a fact
         # about the environment, not about the fallback behavior.
         with mock.patch(
-            "src.pipelines.processing.models.clip.get_clip_model",
+            "src.infrastructure.ml.clip.get_clip_model",
             side_effect=ImportError("CLIP is unavailable"),
         ):
             self.assertIsNone(self.search._encode_query("cat"))
@@ -84,7 +87,7 @@ class SemanticFallbackTests(unittest.TestCase):
         fake_model = mock.Mock()
         fake_model.embed_text.return_value = None
         with mock.patch(
-            "src.pipelines.processing.models.clip.get_clip_model",
+            "src.infrastructure.ml.clip.get_clip_model",
             return_value=fake_model,
         ):
             self.assertIsNone(self.search._encode_query("cat"))

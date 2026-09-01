@@ -1,15 +1,15 @@
-"""HTTP route modules."""
+"""HTTP and WebSocket route modules — see rest/ and ws/."""
 
-from src.api.routes.auth import router as auth_router
-from src.api.routes.images import router as images_router
-from src.api.routes.jobs import router as jobs_router
-from src.api.routes.pipeline_nodes import router as pipeline_nodes_router
-from src.api.routes.pipelines import router as pipelines_router
-from src.api.routes.search import router as search_router
-from src.api.routes.stats import router as stats_router
-from src.api.routes.status import router as status_router
-from src.api.routes.websocket import router as websocket_router
-from src.api.routes.workspaces import router as workspaces_router
+from src.api.routes.rest.auth import router as auth_router
+from src.api.routes.rest.images import router as images_router
+from src.api.routes.rest.jobs import router as jobs_router
+from src.api.routes.rest.pipeline_nodes import router as pipeline_nodes_router
+from src.api.routes.rest.pipelines import router as pipelines_router
+from src.api.routes.rest.search import router as search_router
+from src.api.routes.rest.stats import router as stats_router
+from src.api.routes.rest.status import router as status_router
+from src.api.routes.rest.workspaces import router as workspaces_router
+from src.api.routes.ws.events_socket import router as websocket_router
 
 __all__ = [
     "auth_router",

@@ -3,8 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.pipelines.ingestion import FilesystemReconciler, pipeline_version_hash
-from src.repositories import InMemoryPipelineRepository
+from src.consumer.ingestion import pipeline_version_hash
+from src.services.reconciliation_service import ReconciliationService
+from tests.repo_factory import new_repos
 
 
 class FakePublisher:
@@ -20,11 +21,11 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "a.jpg").write_bytes(b"image-bytes")
-        self.repo = InMemoryPipelineRepository()
+        self.r = new_repos()
         self.publisher = FakePublisher()
         self.node_ids = {
             n["node_type"]: n["_id"]
-            for n in self.repo.list_pipeline_nodes(owner_id="owner-1")
+            for n in self.r.nodes.list_all(owner_id="owner-1")
         }
 
     async def asyncTearDown(self):
@@ -39,11 +40,11 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
                 "config_overrides": overrides or {},
             }
         ]
-        return self.repo.create_pipeline(owner_id="owner-1", name=name, nodes=nodes)
+        return self.r.pipelines.create(owner_id="owner-1", name=name, nodes=nodes)
 
     def _reconciler(self, pipeline_ids):
-        return FilesystemReconciler(
-            repository=self.repo,
+        return ReconciliationService(
+            assets=self.r.assets, observations=self.r.observations, jobs=self.r.jobs, pipelines=self.r.pipelines,
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="ws-1",
@@ -58,7 +59,7 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
 
         await self._reconciler([p1["_id"], p2["_id"]]).reconcile()
 
-        jobs = self.repo.list_jobs()
+        jobs = self.r.jobs.list_all()
         self.assertEqual(len(jobs), 2)
         self.assertEqual({j["pipeline_id"] for j in jobs}, {p1["_id"], p2["_id"]})
         self.assertEqual(len(self.publisher.messages), 2)
@@ -67,15 +68,15 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
         pipeline = self._make_pipeline("p1")
         await self._reconciler([pipeline["_id"]]).reconcile()
 
-        job = self.repo.list_jobs()[0]
-        defn = self.repo.get_pipeline(pipeline["_id"])
+        job = self.r.jobs.list_all()[0]
+        defn = self.r.pipelines.get(pipeline["_id"])
         expected = pipeline_version_hash(defn["nodes"], defn.get("edges", []))
         self.assertEqual(job["pipeline_version"], expected)
 
     async def test_editing_pipeline_config_triggers_reprocess(self):
         pipeline = self._make_pipeline("p1")
         await self._reconciler([pipeline["_id"]]).reconcile()
-        self.assertEqual(len(self.repo.list_jobs()), 1)
+        self.assertEqual(len(self.r.jobs.list_all()), 1)
 
         # Editing the pipeline changes its version hash → a new job is created.
         from src.services.pipeline_service import _build_graph
@@ -83,44 +84,64 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
         updated_nodes, updated_edges = _build_graph([
             {"pipeline_node_id": self.node_ids["captioning"], "config_overrides": {"model": "blip-large"}}
         ])
-        self.repo.update_pipeline(
+        self.r.pipelines.update(
             pipeline["_id"], {"nodes": updated_nodes, "edges": updated_edges}
         )
 
         await self._reconciler([pipeline["_id"]]).reconcile()
-        jobs = self.repo.list_jobs()
+        jobs = self.r.jobs.list_all()
         self.assertEqual(len(jobs), 2)
         self.assertEqual(len({j["pipeline_version"] for j in jobs}), 2)
 
-    async def test_rescan_redispatches_failed_job(self):
+    async def test_manual_rescan_redispatches_failed_job(self):
+        # `redispatch_failed=True` is what a manual "Scan" API call opts into
+        # (see consume_scan_commands) — a human explicitly asking to re-check
+        # the workspace is exactly when retrying a failed job makes sense.
         pipeline = self._make_pipeline("p1")
         await self._reconciler([pipeline["_id"]]).reconcile()
-        job = self.repo.list_jobs()[0]
+        job = self.r.jobs.list_all()[0]
 
         # Job fails permanently (e.g. an executor error), then gets retried.
-        self.repo.fail_job(job["_id"], None, {"class": "X", "message": "boom"}, permanent=True)
-        self.assertEqual(self.repo.get_job(job["_id"])["status"], "failed")
+        self.r.jobs.fail(job["_id"], final_status="failed", next_attempt_at=None, error={"class": "X", "message": "boom"})
+        self.assertEqual(self.r.jobs.get(job["_id"])["status"], "failed")
+        self.publisher.messages.clear()
+
+        await self._reconciler([pipeline["_id"]]).reconcile(redispatch_failed=True)
+
+        requeued = self.r.jobs.get(job["_id"])
+        self.assertEqual(requeued["status"], "queued")
+        self.assertEqual(requeued["attempt_count"], 0)  # fresh retry budget
+        self.assertEqual(len(self.r.jobs.list_all()), 1)  # requeued, not duplicated
+        self.assertIn(job["_id"], self.publisher.messages)  # re-dispatched
+
+    async def test_automatic_rescan_leaves_failed_job_failed(self):
+        # The periodic full-workspace reconcile and the live filesystem watcher
+        # both call reconcile()/observe_file() with no override — an automatic,
+        # unattended pass must never resurrect a job that's already failed, or
+        # a deterministic bug retries forever with nobody watching.
+        pipeline = self._make_pipeline("p1")
+        await self._reconciler([pipeline["_id"]]).reconcile()
+        job = self.r.jobs.list_all()[0]
+
+        self.r.jobs.fail(job["_id"], final_status="failed", next_attempt_at=None, error={"class": "X", "message": "boom"})
         self.publisher.messages.clear()
 
         await self._reconciler([pipeline["_id"]]).reconcile()
 
-        requeued = self.repo.get_job(job["_id"])
-        self.assertEqual(requeued["status"], "queued")
-        self.assertEqual(requeued["attempt_count"], 0)  # fresh retry budget
-        self.assertEqual(len(self.repo.list_jobs()), 1)  # requeued, not duplicated
-        self.assertIn(job["_id"], self.publisher.messages)  # re-dispatched
+        self.assertEqual(self.r.jobs.get(job["_id"])["status"], "failed")
+        self.assertEqual(self.publisher.messages, [])
 
     async def test_rescan_leaves_completed_job_alone(self):
         pipeline = self._make_pipeline("p1")
         await self._reconciler([pipeline["_id"]]).reconcile()
-        job = self.repo.list_jobs()[0]
-        run = self.repo.start_job(job["_id"])
-        self.repo.complete_job(job["_id"], run["pipeline_run_id"])
+        job = self.r.jobs.list_all()[0]
+        self.r.jobs.start(job["_id"])
+        self.r.jobs.complete(job["_id"])
         self.publisher.messages.clear()
 
         await self._reconciler([pipeline["_id"]]).reconcile()
 
-        self.assertEqual(self.repo.get_job(job["_id"])["status"], "completed")
+        self.assertEqual(self.r.jobs.get(job["_id"])["status"], "completed")
         self.assertEqual(self.publisher.messages, [])  # not re-dispatched
 
     async def test_no_assigned_pipeline_creates_no_jobs(self):
@@ -128,8 +149,8 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
 
         # Files are still ingested, but nothing is dispatched — there is no
         # implicit default pipeline anymore.
-        self.assertEqual(self.repo.list_jobs(), [])
-        self.assertEqual(len(self.repo.image_assets.docs), 1)
+        self.assertEqual(self.r.jobs.list_all(), [])
+        self.assertEqual(len(self.r.assets.collection.docs), 1)
 
 
 if __name__ == "__main__":

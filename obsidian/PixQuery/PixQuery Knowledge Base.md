@@ -10,6 +10,7 @@ This folder is maintained as an Obsidian-openable markdown knowledge base for Pi
 - [[Architecture Reality Map]]
 - [[Market & Technical Landscape Analysis]]
 - [[Implementation Task Backlog]]
+- [[Backend Module Structure — Audit & Reorganisation Plan]] — `backend/src/` layout, naming, and layering; three tiers, Tier 3 (`pipelines/` → `workers/`) done, Tiers 1–2 planned (2026-08-29)
 
 ## Decisions
 

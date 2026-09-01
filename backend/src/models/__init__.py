@@ -22,7 +22,6 @@ from src.models.documents import (
     User,
     WorkspaceDefinition,
     WorkspaceMember,
-    utcnow,
 )
 
 __all__ = [
@@ -38,5 +37,4 @@ __all__ = [
     "User",
     "WorkspaceDefinition",
     "WorkspaceMember",
-    "utcnow",
 ]

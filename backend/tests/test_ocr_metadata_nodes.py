@@ -10,17 +10,24 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.pipelines.processing.executors import get_executor
-from src.pipelines.processing.executors.builtin import (
+from src.services.executors import get_executor
+from src.services.pipeline_execution_service import PipelineExecutionService, _shape_output
+from src.services.search_service import SearchService
+from src.utils.exif import (
     _dms_to_decimal,
     _exif_subifd_to_dict,
     _exif_to_dict,
     _gps_to_dict,
     _to_number,
 )
-from src.pipelines.processing.pipeline import DynamicPipeline, _shape_output
-from src.repositories import InMemoryPipelineRepository
-from src.services.search_service import SearchService
+from tests.repo_factory import new_repos
+
+
+def _execution_service(r, **overrides):
+    return PipelineExecutionService(
+        jobs=r.jobs, runs=r.runs, outputs=r.outputs, assets=r.assets,
+        pipelines=r.pipelines, nodes=r.nodes, **overrides,
+    )
 
 
 class RegistryAndShapeTests(unittest.TestCase):
@@ -102,12 +109,12 @@ class GpsExtractionTests(unittest.TestCase):
 
 class OcrPersistenceAndSearchTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
+        self.r = new_repos()
         self.node_ids = {
             n["node_type"]: n["_id"]
-            for n in self.repo.list_pipeline_nodes(owner_id="owner-1")
+            for n in self.r.nodes.list_all(owner_id="owner-1")
         }
-        self.asset = self.repo.upsert_asset(
+        self.asset = self.r.assets.upsert(
             content_sha256="h1", mime_type="image/jpeg", size_bytes=5,
             current_path="/photos/scan.png",
         )
@@ -120,8 +127,8 @@ class OcrPersistenceAndSearchTests(unittest.TestCase):
             "order": 0,
             "config_overrides": {},
         }]
-        definition = self.repo.create_pipeline(owner_id="owner-1", name="ocr", nodes=nodes)
-        job, _ = self.repo.ensure_processing_job(
+        definition = self.r.pipelines.create(owner_id="owner-1", name="ocr", nodes=nodes)
+        job, _ = self.r.jobs.get_or_create(
             asset_id=self.asset["_id"], pipeline_id=definition["_id"], pipeline_version="v",
         )
 
@@ -132,21 +139,26 @@ class OcrPersistenceAndSearchTests(unittest.TestCase):
             def run(self, context, config):
                 return {"ocr_text": "Quarterly Revenue Report 2024"}
 
-        pipeline = DynamicPipeline(
+        pipeline = _execution_service(
+            self.r,
             get_executor=lambda nt: FakeOcr(),
             image_loader=lambda asset: "IMG",
         )
-        pipeline.run_job(self.repo, job["_id"])
+        pipeline.run_job(job["_id"])
 
         # Persisted under output_type "ocr" with text payload.
-        stored = list(self.repo.model_outputs.find({"asset_id": self.asset["_id"]}))
+        stored = list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]}))
         self.assertEqual(len(stored), 1)
         self.assertEqual(stored[0]["output_type"], "ocr")
         self.assertEqual(stored[0]["payload"]["text"], "Quarterly Revenue Report 2024")
         self.assertEqual(stored[0]["node_type"], "ocr")
 
         # Searchable by recognized text, with an "ocr" match field.
-        results = SearchService(self.repo).search(query="revenue", mode="keyword")
+        search = SearchService(
+            assets=self.r.assets, observations=self.r.observations,
+            workspaces=self.r.workspaces, outputs=self.r.outputs,
+        )
+        results = search.search(query="revenue", mode="keyword")
         self.assertEqual([r["_id"] for r in results], [self.asset["_id"]])
         self.assertIn("ocr", results[0]["match_reason"]["fields"])
 
@@ -158,13 +170,13 @@ class MetadataAlwaysExtractedTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.img = Path(self.tmp.name) / "p.png"
         Image.new("RGB", (12, 7), "green").save(self.img)
-        self.repo = InMemoryPipelineRepository()
-        self.asset = self.repo.upsert_asset(
+        self.r = new_repos()
+        self.asset = self.r.assets.upsert(
             content_sha256="h", mime_type="image/png", size_bytes=1,
             current_path=str(self.img),
         )
         # A no-op node so the empty-pipeline default chain doesn't kick in.
-        self.noop = self.repo.create_pipeline_node(
+        self.noop = self.r.nodes.create(
             name="Noop", description="", node_type="noop",
             context_inputs=["image"], context_outputs=[],
             config_schema={}, default_config={}, owner_id="o",
@@ -176,8 +188,8 @@ class MetadataAlwaysExtractedTests(unittest.TestCase):
     def _run(self):
         nodes = [{"node_id": "n0", "pipeline_node_id": self.noop["_id"],
                   "order": 0, "config_overrides": {}}]
-        pipeline_def = self.repo.create_pipeline(owner_id="o", name="P", nodes=nodes)
-        job, _ = self.repo.ensure_processing_job(
+        pipeline_def = self.r.pipelines.create(owner_id="o", name="P", nodes=nodes)
+        job, _ = self.r.jobs.get_or_create(
             asset_id=self.asset["_id"], pipeline_id=pipeline_def["_id"], pipeline_version="v",
         )
 
@@ -188,15 +200,16 @@ class MetadataAlwaysExtractedTests(unittest.TestCase):
             def run(self, context, config):
                 return {}
 
-        DynamicPipeline(
+        _execution_service(
+            self.r,
             get_executor=lambda nt: FakeNoop(),
             image_loader=lambda a: "IMG",
-        ).run_job(self.repo, job["_id"])
+        ).run_job(job["_id"])
 
     def test_metadata_written_to_asset_not_model_outputs(self):
         self._run()
-        self.assertEqual(list(self.repo.model_outputs.find({"asset_id": self.asset["_id"]})), [])
-        asset = self.repo.get_asset(self.asset["_id"])
+        self.assertEqual(list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]})), [])
+        asset = self.r.assets.get(self.asset["_id"])
         self.assertEqual(asset["metadata"]["width"], 12)
         self.assertEqual(asset["metadata"]["height"], 7)
 

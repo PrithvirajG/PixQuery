@@ -1,20 +1,51 @@
+from src.repositories.image_assets_repository import ImageAssetsRepository
+from src.repositories.file_observations_repository import FileObservationsRepository
+from src.repositories.model_outputs_repository import ModelOutputsRepository
+from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
+from src.repositories.pipeline_runs_repository import PipelineRunsRepository
+from src.repositories.processing_jobs_repository import ProcessingJobsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
+from src.services.access_scope import accessible_asset_ids, can_access_asset
 from src.services.document_serializer import serialize_document, serialize_documents
+from src.utils.collections import top_by_frequency
 
 
 class ImageService:
-    def __init__(self, repository):
-        self.repository = repository
+    def __init__(
+        self,
+        *,
+        assets: ImageAssetsRepository,
+        observations: FileObservationsRepository,
+        workspaces: WorkspaceDefinitionsRepository,
+        pipelines: PipelineDefinitionsRepository,
+        jobs: ProcessingJobsRepository,
+        runs: PipelineRunsRepository,
+        outputs: ModelOutputsRepository,
+    ):
+        self.assets = assets
+        self.observations = observations
+        self.workspaces = workspaces
+        self.pipelines = pipelines
+        self.jobs = jobs
+        self.runs = runs
+        self.outputs = outputs
 
     def list_images(self, *, user_id: str | None = None, limit: int = 100, skip: int = 0):
-        assets = self.repository.list_active_assets(user_id=user_id, limit=limit, skip=skip)
+        if user_id is not None:
+            scope = accessible_asset_ids(self.workspaces, self.observations, user_id)
+            assets = self.assets.list_by_ids(scope, limit=limit, skip=skip)
+        else:
+            assets = self.assets.list_all(active_only=True, limit=limit, skip=skip)
         return serialize_documents(assets)
 
     def get_image(self, asset_id: str, *, user_id: str | None = None):
-        asset = self.repository.get_asset(asset_id)
+        asset = self.assets.get(asset_id)
         if not asset or not asset.get("active"):
             return None
         # Access is granted when the asset is observed in a workspace the user can reach.
-        if user_id is not None and not self.repository.can_access_asset(user_id, asset_id):
+        if user_id is not None and not can_access_asset(
+            self.workspaces, self.observations, user_id, asset_id
+        ):
             return None
         return serialize_document(asset)
 
@@ -28,7 +59,7 @@ class ImageService:
         if not asset:
             return None
 
-        outputs = list(self.repository.model_outputs.find({"asset_id": asset_id}))
+        outputs = self.outputs.list_for_asset(asset_id)
         caption = next(
             (o["payload"].get("text", "") for o in outputs if o.get("output_type") == "caption"),
             "",
@@ -56,9 +87,9 @@ class ImageService:
         (asset, pipeline) pair; see ``_pipeline_state``.
         """
         asset_id = asset["_id"]
-        runs = list(self.repository.pipeline_runs.find({"asset_id": asset_id}))
+        runs = self.runs.list_for_asset(asset_id)
         run_by_id = {r["_id"]: r for r in runs}
-        jobs = list(self.repository.processing_jobs.find({"asset_id": asset_id}))
+        jobs = self.jobs.list_for_asset(asset_id)
         job_by_pipeline = {j.get("pipeline_id"): j for j in jobs}
 
         outputs_by_pipeline: dict = {}
@@ -67,7 +98,7 @@ class ImageService:
             outputs_by_pipeline.setdefault(pid, []).append(o)
 
         workspace = (
-            self.repository.get_workspace(asset["workspace_id"])
+            self.workspaces.get(asset["workspace_id"])
             if asset.get("workspace_id")
             else None
         )
@@ -83,7 +114,7 @@ class ImageService:
 
         pipelines = []
         for pid in attached_ids + detached_ids:
-            definition = self.repository.get_pipeline(pid)
+            definition = self.pipelines.get(pid)
             outs = outputs_by_pipeline.get(pid, [])
             if not definition and not outs:
                 continue  # deleted pipeline with nothing left to show
@@ -166,7 +197,7 @@ def _summarize(output_type: str, payload: dict) -> str:
         return (text[:120] + "…") if len(text) > 120 else (text or "—")
     if output_type == "detections":
         dets = payload.get("detections", []) or []
-        labels = _top_labels([d.get("label") for d in dets])
+        labels = top_by_frequency([d.get("label") for d in dets])
         return f"{len(dets)} detection{'' if len(dets) == 1 else 's'}" + (f": {labels}" if labels else "")
     if output_type == "labels":
         labels = payload.get("labels", []) or []
@@ -187,15 +218,6 @@ def _summarize(output_type: str, payload: dict) -> str:
         return wi.get("path", "—")
     # generic: list the payload keys
     return ", ".join(payload.keys()) or "—"
-
-
-def _top_labels(labels: list, limit: int = 3) -> str:
-    counts: dict = {}
-    for label in labels:
-        if label:
-            counts[label] = counts.get(label, 0) + 1
-    ordered = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
-    return ", ".join(f"{name}×{n}" if n > 1 else name for name, n in ordered)
 
 
 def _iso(value):

@@ -13,9 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.pipelines.ingestion import FilesystemReconciler
-from src.repositories import InMemoryPipelineRepository
+from src.services.reconciliation_service import ReconciliationService
 from src.services.search_service import SearchService
+from tests.repo_factory import new_repos
 
 
 class FakePublisher:
@@ -30,10 +30,10 @@ class SmokeSearchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.repository = InMemoryPipelineRepository()
+        self.r = new_repos()
         self.publisher = FakePublisher()
-        self.reconciler = FilesystemReconciler(
-            repository=self.repository,
+        self.reconciler = ReconciliationService(
+            assets=self.r.assets, observations=self.r.observations, jobs=self.r.jobs, pipelines=self.r.pipelines,
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="smoke-root",
@@ -42,7 +42,10 @@ class SmokeSearchTests(unittest.IsolatedAsyncioTestCase):
             stable_interval_seconds=0.01,
             stable_timeout_seconds=1,
         )
-        self.search = SearchService(self.repository)
+        self.search = SearchService(
+            assets=self.r.assets, observations=self.r.observations,
+            workspaces=self.r.workspaces, outputs=self.r.outputs,
+        )
 
     async def asyncTearDown(self):
         self.tmp.cleanup()
@@ -51,22 +54,26 @@ class SmokeSearchTests(unittest.IsolatedAsyncioTestCase):
         """Reconcile one file and return its asset_id."""
         (self.root / name).write_bytes(content)
         await self.reconciler.reconcile()
-        asset = next(a for a in self.repository.list_active_assets() if a["current_path"].endswith(name))
+        asset = next(a for a in self.r.assets.list_all(active_only=True) if a["current_path"].endswith(name))
         return asset["_id"]
 
     def _simulate_processing(self, asset_id: str, caption: str) -> None:
         """Mimic the worker: run a pipeline job and store a caption output."""
-        job = self.repository.list_jobs()[0]
-        started = self.repository.start_job(job["_id"])
-        self.repository.add_model_output(
+        job = self.r.jobs.list_all()[0]
+        self.r.jobs.start(job["_id"])
+        run = self.r.runs.create(
+            job_id=job["_id"], asset_id=job["asset_id"],
+            pipeline_id=job["pipeline_id"], pipeline_version=job["pipeline_version"],
+        )
+        self.r.outputs.add(
             asset_id=asset_id,
-            pipeline_run_id=started["pipeline_run_id"],
+            pipeline_run_id=run["_id"],
             model_name="blip",
             model_version="image-captioning-base",
             output_type="caption",
             payload={"text": caption},
         )
-        self.repository.complete_job(job["_id"], started["pipeline_run_id"])
+        self.r.jobs.complete(job["_id"])
 
     async def test_ingest_process_then_keyword_search_by_caption(self):
         asset_id = await self._ingest("beach.jpg", b"fake-image-bytes")

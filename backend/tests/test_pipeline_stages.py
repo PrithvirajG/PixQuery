@@ -6,7 +6,7 @@ tesseract) get a stub model so what's under test is the executor's own contract:
 which context keys it reads, which it returns, and how it interprets config.
 
 The context contract matters as much as the output: ``run`` must return ONLY the
-keys it adds or replaces (``BaseNodeExecutor.run``), because DynamicPipeline
+keys it adds or replaces (``BaseNodeExecutor.run``), because PipelineExecutionService
 merges those into the graph context and persists them as model_outputs.
 """
 import tempfile
@@ -15,13 +15,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.pipelines.processing.executors import get_executor
-from src.pipelines.processing.executors.base import (
-    BaseNodeExecutor,
-    NodeExecutionError,
-    PermanentNodeError,
-)
-from src.pipelines.processing.executors.builtin import (
+from src.errors.executors import NodeExecutionError, PermanentNodeError
+from src.services.executors import get_executor
+from src.services.executors.base import BaseNodeExecutor
+from src.services.executors.builtin import (
     CaptioningExecutor,
     ClassificationExecutor,
     EmbeddingExecutor,
@@ -419,16 +416,16 @@ class RegistryTests(unittest.TestCase):
 
     def test_every_seeded_system_node_has_an_executor(self):
         # A seeded node with no executor would fail every job that uses it.
-        from src.repositories.mongo_pipeline import MongoPipelineRepository
+        from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
 
-        for spec in MongoPipelineRepository._SYSTEM_NODES:
+        for spec in PipelineNodesRepository._SYSTEM_NODES:
             with self.subTest(node_type=spec["node_type"]):
                 self.assertIsInstance(get_executor(spec["node_type"]), BaseNodeExecutor)
 
     def test_seeded_output_ports_match_what_executors_emit(self):
         # The regression behind the Face Detection bug: the node advertised a
         # "faces" port while its executor emitted "detections".
-        from src.repositories.mongo_pipeline import MongoPipelineRepository
+        from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
 
         emitted = {
             "object_detection": ["detections"],
@@ -438,7 +435,7 @@ class RegistryTests(unittest.TestCase):
             "embedding": ["embeddings"],
             "ocr": ["ocr_text"],
         }
-        for spec in MongoPipelineRepository._SYSTEM_NODES:
+        for spec in PipelineNodesRepository._SYSTEM_NODES:
             expected = emitted.get(spec["node_type"])
             if expected is None:
                 continue

@@ -1,19 +1,68 @@
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+import logging
 from typing import Any, Literal
 
+from src.infrastructure.vector_store.protocol import QueryEncoder, VectorSearchClient
+from src.repositories.file_observations_repository import FileObservationsRepository
+from src.repositories.image_assets_repository import ImageAssetsRepository
+from src.repositories.model_outputs_repository import ModelOutputsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
+from src.services.access_scope import accessible_asset_ids, workspace_asset_ids
 from src.services.document_serializer import serialize_document
 
 
 SearchMode = Literal["semantic", "keyword", "hybrid"]
 
+_logger = logging.getLogger("pixquery.search")
+
+# Weaviate class holding caption/OCR text vectors — what a text query searches.
+TEXT_EMBEDDING_CLASS = "TextEmbedding"
+
 
 class SearchService:
-    def __init__(self, repository):
-        self.repository = repository
+    """Query routing and result ranking. Knows nothing about Weaviate or CLIP.
+
+    The two external capabilities semantic search needs — embedding the query and
+    finding nearest neighbours — arrive as injected collaborators rather than
+    imports reached for mid-method, so the ranking and fusion logic here can be
+    exercised against stubs. Both default to the real adapters and are built
+    lazily: constructing a ``SearchService`` performs no I/O, and a deployment
+    with no vector store still serves keyword search.
+    """
+
+    def __init__(
+        self,
+        *,
+        assets: ImageAssetsRepository,
+        observations: FileObservationsRepository,
+        workspaces: WorkspaceDefinitionsRepository,
+        outputs: ModelOutputsRepository,
+        vector_store: VectorSearchClient | None = None,
+        query_encoder: QueryEncoder | None = None,
+    ):
+        self.assets = assets
+        self.observations = observations
+        self.workspaces = workspaces
+        self.outputs = outputs
+        self._vector_store = vector_store
+        self._query_encoder = query_encoder
+
+    @property
+    def vector_store(self) -> VectorSearchClient:
+        if self._vector_store is None:
+            from src.infrastructure.vector_store.weaviate import WeaviateSearchClient
+
+            self._vector_store = WeaviateSearchClient()
+        return self._vector_store
+
+    @property
+    def query_encoder(self) -> QueryEncoder:
+        if self._query_encoder is None:
+            from src.infrastructure.vector_store.query_encoder import ClipQueryEncoder
+
+            self._query_encoder = ClipQueryEncoder()
+        return self._query_encoder
 
     def search(
         self,
@@ -144,21 +193,28 @@ class SearchService:
     ) -> list[dict[str, Any]]:
         vector = self._encode_query(query)
         if vector is None:
+            # The encoder has already logged *why* it could not encode.
+            _logger.info("Semantic search falling back to keyword: query not encodable")
             return self._keyword_search(
                 query=query, user_id=user_id,
                 top_k=top_k, skip=skip, workspace_id=workspace_id,
             )
 
         try:
-            from src.config import WEAVIATE_URL
-            hits = _weaviate_near_vector(
-                url=WEAVIATE_URL,
-                class_name="TextEmbedding",
+            hits = self.vector_store.near_vector(
+                class_name=TEXT_EMBEDDING_CLASS,
                 vector=vector,
                 top_k=top_k + skip,
                 certainty=threshold or 0.0,
             )
         except Exception:
+            # A misconfigured or unreachable vector store must not take search
+            # down, but it is an operational fault and looks nothing like "CLIP
+            # isn't installed" — log it loudly enough to tell the two apart.
+            _logger.warning(
+                "Vector store query failed; falling back to keyword search",
+                exc_info=True,
+            )
             return self._keyword_search(
                 query=query, user_id=user_id,
                 top_k=top_k, skip=skip, workspace_id=workspace_id,
@@ -174,7 +230,7 @@ class SearchService:
             asset_id = hit.get("asset_id")
             if allowed_ids is not None and asset_id not in allowed_ids:
                 continue
-            asset = self.repository.get_asset(asset_id)
+            asset = self.assets.get(asset_id)
             if not asset or not asset.get("active"):
                 continue
             certainty = hit.get("certainty", 0.0)
@@ -238,29 +294,10 @@ class SearchService:
         limit: int,
         skip: int = 0,
     ) -> list[dict[str, Any]]:
-        if workspace_id:
-            workspace = self.repository.get_workspace(workspace_id)
-            if workspace:
-                ws_id = workspace["_id"]
-                # Support both new (workspace_id) and legacy (watch_root_id) field names
-                obs = list(
-                    self.repository.file_observations.find(
-                        {"$or": [
-                            {"workspace_id": ws_id},
-                            {"watch_root_id": workspace.get("watch_root_id", "__none__")},
-                        ], "status": "active"}
-                    )
-                )
-                asset_ids = [o["asset_id"] for o in obs]
-                return list(
-                    self.repository.image_assets.find(
-                        {"_id": {"$in": asset_ids}, "active": True}
-                    )
-                    .sort("latest_seen_at", -1)
-                    .skip(skip)
-                    .limit(limit)
-                )
-        return self.repository.list_active_assets(user_id=user_id, limit=limit, skip=skip)
+        scope = self._allowed_asset_ids(user_id=user_id, workspace_id=workspace_id)
+        if scope is None:
+            return self.assets.list_all(active_only=True, limit=limit, skip=skip)
+        return self.assets.list_by_ids(scope, limit=limit, skip=skip)
 
     def _allowed_asset_ids(
         self,
@@ -268,54 +305,53 @@ class SearchService:
         user_id: str | None,
         workspace_id: str | None,
     ) -> set[str] | None:
-        """Return the set of asset IDs visible to this user/workspace, or None for no restriction."""
-        if workspace_id:
-            workspace = self.repository.get_workspace(workspace_id)
-            if workspace:
-                ws_id = workspace["_id"]
-                obs = list(
-                    self.repository.file_observations.find(
-                        {"$or": [
-                            {"workspace_id": ws_id},
-                            {"watch_root_id": workspace.get("watch_root_id", "__none__")},
-                        ], "status": "active"}
-                    )
-                )
-                return {o["asset_id"] for o in obs}
-        if user_id:
-            assets = self.repository.list_active_assets(user_id=user_id, limit=10000)
-            return {a["_id"] for a in assets}
-        return None
+        """Asset IDs this request may see, or None when wholly unrestricted.
+
+        ``workspace_id`` is a *filter*, never a widening: it comes off the query
+        string unvalidated, so the workspace's assets are intersected with the
+        user's own accessible set rather than replacing it. Passing another
+        user's workspace id therefore narrows the result to nothing instead of
+        exposing their images.
+        """
+        workspace_scope = (
+            workspace_asset_ids(self.workspaces, self.observations, workspace_id)
+            if workspace_id else None
+        )
+        user_scope = (
+            accessible_asset_ids(self.workspaces, self.observations, user_id)
+            if user_id else None
+        )
+        if workspace_scope is None:
+            return user_scope
+        if user_scope is None:
+            return workspace_scope
+        return workspace_scope & user_scope
 
     def _captions_map(self) -> dict[str, str]:
-        return self._text_output_map("caption")
+        return self._text_map("caption")
 
     def _ocr_map(self) -> dict[str, str]:
-        return self._text_output_map("ocr")
+        return self._text_map("ocr")
 
-    def _text_output_map(self, output_type: str) -> dict[str, str]:
-        outputs = self.repository.model_outputs.find({"output_type": output_type})
+    def _text_map(self, output_type: str) -> dict[str, str]:
+        """Map asset_id → the ``payload.text`` of its output of this type.
+
+        Where an asset has several outputs of the same type (two pipelines both
+        captioning it), the last one wins — search only needs one representative
+        string per asset.
+        """
         return {
             output["asset_id"]: output.get("payload", {}).get("text", "")
-            for output in outputs
+            for output in self.outputs.list_by_type(output_type)
         }
 
     def _encode_query(self, query: str) -> list[float] | None:
-        """Encode a text query to a CLIP vector. Returns None if CLIP unavailable.
+        """Encode a text query into the stored embeddings' vector space.
 
-        Uses the same shared ``ClipModel`` (clip ViT-B/32) that the worker uses to
-        embed images, so the query and the stored image/caption embeddings live in
-        one vector space. The model is cached, so it loads once — not per request.
+        Returns None when encoding is unavailable, which is the signal callers use
+        to degrade to keyword search. The encoder itself logs the reason.
         """
-        try:
-            from src.pipelines.processing.models.clip import get_clip_model
-
-            vector = get_clip_model().embed_text(query)
-            if vector is None:
-                return None
-            return [float(v) for v in vector]
-        except Exception:
-            return None
+        return self.query_encoder.encode(query)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -366,54 +402,3 @@ def _combine_match_reasons(
     if keyword_reason:
         return keyword_reason
     return {"mode": "semantic", "similarity": similarity or 0.0}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Weaviate helper — raw GraphQL nearVector query
-
-def _weaviate_near_vector(
-    *,
-    url: str,
-    class_name: str,
-    vector: list[float],
-    top_k: int,
-    certainty: float,
-) -> list[dict[str, Any]]:
-    gql = {
-        "query": f"""
-        {{
-          Get {{
-            {class_name}(
-              nearVector: {{
-                vector: {json.dumps(vector)}
-                certainty: {certainty}
-              }}
-              limit: {top_k}
-            ) {{
-              asset_id
-              text
-              _additional {{ certainty id }}
-            }}
-          }}
-        }}
-        """
-    }
-    data = json.dumps(gql).encode("utf-8")
-    req = urllib.request.Request(
-        f"{url.rstrip('/')}/v1/graphql",
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    hits = body.get("data", {}).get("Get", {}).get(class_name, []) or []
-    return [
-        {
-            "asset_id": h.get("asset_id"),
-            "certainty": h.get("_additional", {}).get("certainty", 0.0),
-        }
-        for h in hits
-        if h.get("asset_id")
-    ]

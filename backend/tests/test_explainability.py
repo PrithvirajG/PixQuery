@@ -1,22 +1,25 @@
 """Tests for search match_reason and image-detail provenance."""
 import unittest
 
-from src.repositories import InMemoryPipelineRepository
 from src.services.image_service import ImageService
 from src.services.search_service import SearchService, _combine_match_reasons
+from tests.repo_factory import new_repos
 
 
 class MatchReasonTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
-        self.search = SearchService(self.repo)
+        self.r = new_repos()
+        self.search = SearchService(
+            assets=self.r.assets, observations=self.r.observations,
+            workspaces=self.r.workspaces, outputs=self.r.outputs,
+        )
 
     def _add(self, sha, path, caption):
-        asset = self.repo.upsert_asset(
+        asset = self.r.assets.upsert(
             content_sha256=sha, mime_type="image/jpeg", size_bytes=5, current_path=path
         )
         if caption:
-            self.repo.add_model_output(
+            self.r.outputs.add(
                 asset_id=asset["_id"], pipeline_run_id="r", model_name="blip",
                 model_version="base", output_type="caption", payload={"text": caption},
             )
@@ -59,33 +62,49 @@ class MatchReasonTests(unittest.TestCase):
         )
 
 
+def _begin_run(r, job):
+    """Mirrors PipelineExecutionService._begin_run: drop prior runs/outputs for
+    this job (reprocessing replaces, not accumulates), then start a fresh run."""
+    prior_run_ids = [run["_id"] for run in r.runs.list_for_job(job["_id"])]
+    r.outputs.delete_for_runs(prior_run_ids)
+    r.runs.delete_for_job(job["_id"])
+    return r.runs.create(
+        job_id=job["_id"], asset_id=job["asset_id"],
+        pipeline_id=job["pipeline_id"], pipeline_version=job["pipeline_version"],
+    )
+
+
 class ProvenanceTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryPipelineRepository()
-        self.images = ImageService(self.repo)
+        self.r = new_repos()
+        self.images = ImageService(
+            assets=self.r.assets, observations=self.r.observations, workspaces=self.r.workspaces,
+            pipelines=self.r.pipelines, jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs,
+        )
 
     def test_detail_includes_ordered_outputs_and_pipeline_run(self):
-        asset = self.repo.upsert_asset(
+        asset = self.r.assets.upsert(
             content_sha256="h1", mime_type="image/jpeg", size_bytes=5,
             current_path="/photos/cat.jpg",
         )
-        job, _ = self.repo.ensure_processing_job(
+        job, _ = self.r.jobs.get_or_create(
             asset_id=asset["_id"], pipeline_id="pipeline-x", pipeline_version="v1"
         )
-        started = self.repo.start_job(job["_id"])
-        run_id = started["pipeline_run_id"]
+        self.r.jobs.start(job["_id"])
+        run = _begin_run(self.r, job)
         # Add outputs out of order; provenance must sort by node order.
-        self.repo.add_model_output(
-            asset_id=asset["_id"], pipeline_run_id=run_id, model_name="blip",
+        self.r.outputs.add(
+            asset_id=asset["_id"], pipeline_run_id=run["_id"], model_name="blip",
             model_version="base", output_type="caption", payload={"text": "a cat"},
             node_id="n1", node_type="captioning", order=1,
         )
-        self.repo.add_model_output(
-            asset_id=asset["_id"], pipeline_run_id=run_id, model_name="yolo",
+        self.r.outputs.add(
+            asset_id=asset["_id"], pipeline_run_id=run["_id"], model_name="yolo",
             model_version="v8n", output_type="detections", payload={"detections": []},
             node_id="n0", node_type="object_detection", order=0,
         )
-        self.repo.complete_job(job["_id"], run_id)
+        self.r.jobs.complete(job["_id"])
+        self.r.runs.update_status(run["_id"], status="completed", finished_at="t1", error=None)
 
         detail = self.images.get_image_detail(asset["_id"])
 
@@ -105,23 +124,24 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn("summary", grp["outputs"][1])  # caption summary present
 
     def test_reprocessing_replaces_outputs_not_accumulates(self):
-        asset = self.repo.upsert_asset(
+        asset = self.r.assets.upsert(
             content_sha256="h2", mime_type="image/jpeg", size_bytes=5, current_path="/p/x.jpg",
         )
-        job, _ = self.repo.ensure_processing_job(
+        job, _ = self.r.jobs.get_or_create(
             asset_id=asset["_id"], pipeline_id="pl", pipeline_version="v1"
         )
         for _ in range(3):  # scan three times
-            started = self.repo.start_job(job["_id"])
-            self.repo.add_model_output(
-                asset_id=asset["_id"], pipeline_run_id=started["pipeline_run_id"],
+            self.r.jobs.start(job["_id"])
+            run = _begin_run(self.r, job)
+            self.r.outputs.add(
+                asset_id=asset["_id"], pipeline_run_id=run["_id"],
                 model_name="exif", model_version="pillow", output_type="metadata",
                 payload={"metadata": {"width": 10, "height": 10}}, pipeline_id="pl",
             )
-            self.repo.complete_job(job["_id"], started["pipeline_run_id"])
+            self.r.jobs.complete(job["_id"])
 
         # Only the latest run's output survives — no accumulation across re-scans.
-        outs = list(self.repo.model_outputs.find({"asset_id": asset["_id"]}))
+        outs = list(self.r.outputs.collection.find({"asset_id": asset["_id"]}))
         self.assertEqual(len(outs), 1)
         detail = self.images.get_image_detail(asset["_id"])
         self.assertEqual(len(detail["provenance"]["pipelines"]), 1)

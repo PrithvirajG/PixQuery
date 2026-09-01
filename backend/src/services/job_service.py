@@ -1,22 +1,35 @@
-from src.pipelines.ingestion.reconciler import pipeline_version_hash
+from src.errors.jobs import JobConflictError
+from src.errors.workspaces import WorkspaceAccessError
+from src.repositories.image_assets_repository import ImageAssetsRepository
+from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
+from src.repositories.processing_jobs_repository import ProcessingJobsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
-from src.services.workspace_service import WorkspaceAccessError, role_for
-
-
-class JobConflictError(RuntimeError):
-    """Raised when a job cannot be dispatched in its current state."""
+from src.services.pipeline_versioning import pipeline_version_hash
+from src.services.workspace_service import role_for
 
 
 class JobService:
-    def __init__(self, repository, publisher_factory):
-        self.repository = repository
+    def __init__(
+        self,
+        *,
+        jobs: ProcessingJobsRepository,
+        assets: ImageAssetsRepository,
+        workspaces: WorkspaceDefinitionsRepository,
+        pipelines: PipelineDefinitionsRepository,
+        publisher_factory,
+    ):
+        self.jobs = jobs
+        self.assets = assets
+        self.workspaces = workspaces
+        self.pipelines = pipelines
         self.publisher_factory = publisher_factory
 
     def list_jobs(self, *, status: str | None = None, limit: int = 100):
-        return serialize_documents(self.repository.list_jobs(status=status, limit=limit))
+        return serialize_documents(self.jobs.list_all(status=status, limit=limit))
 
     async def requeue_job(self, job_id: str):
-        job = self.repository.requeue_job(job_id)
+        job = self.jobs.requeue(job_id)
         if not job:
             return None
 
@@ -35,11 +48,11 @@ class JobService:
         and requeues it — ``start_job`` drops that job's previous pipeline_run and
         model_outputs before reprocessing, so results replace rather than pile up.
         """
-        asset = self.repository.get_asset(asset_id)
+        asset = self.assets.get(asset_id)
         if not asset or not asset.get("active"):
             return None
         workspace = (
-            self.repository.get_workspace(asset["workspace_id"])
+            self.workspaces.get(asset["workspace_id"])
             if asset.get("workspace_id")
             else None
         )
@@ -50,11 +63,11 @@ class JobService:
             raise JobConflictError(
                 "This pipeline is not attached to the image's workspace"
             )
-        definition = self.repository.get_pipeline(pipeline_id)
+        definition = self.pipelines.get(pipeline_id)
         if not definition:
             return None
         version = pipeline_version_hash(definition.get("nodes", []), definition.get("edges", []))
-        job, created = self.repository.ensure_processing_job(
+        job, created = self.jobs.get_or_create(
             asset_id=asset_id,
             pipeline_id=pipeline_id,
             pipeline_version=version,
@@ -67,4 +80,3 @@ class JobService:
                 f"This pipeline is already {job['status']} for this image"
             )
         return await self.requeue_job(job["_id"])
-

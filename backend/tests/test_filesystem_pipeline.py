@@ -3,8 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.pipelines.ingestion import FilesystemReconciler, wait_for_stable_file
-from src.repositories import InMemoryPipelineRepository
+from src.infrastructure.messaging import EventSink
+from src.services.reconciliation_service import ReconciliationService
+from src.utils.files import wait_for_stable_file
+from tests.repo_factory import new_repos
 
 
 class FakePublisher:
@@ -15,14 +17,22 @@ class FakePublisher:
         self.messages.append(message)
 
 
+def _reconciler(r, **overrides):
+    kwargs = dict(
+        assets=r.assets, observations=r.observations, jobs=r.jobs, pipelines=r.pipelines,
+    )
+    kwargs.update(overrides)
+    return ReconciliationService(**kwargs)
+
+
 class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.repository = InMemoryPipelineRepository()
+        self.r = new_repos()
         self.publisher = FakePublisher()
-        self.reconciler = FilesystemReconciler(
-            repository=self.repository,
+        self.reconciler = _reconciler(
+            self.r,
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="test-root",
@@ -60,22 +70,22 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         await self.reconciler.reconcile()
 
-        self.assertEqual(len(self.repository.image_assets.docs), 1)
-        self.assertEqual(len(self.repository.file_observations.docs), 2)
-        self.assertEqual(len(self.repository.processing_jobs.docs), 1)
+        self.assertEqual(len(self.r.assets.collection.docs), 1)
+        self.assertEqual(len(self.r.observations.collection.docs), 2)
+        self.assertEqual(len(self.r.jobs.collection.docs), 1)
 
     async def test_rename_keeps_same_asset_by_hash(self):
         original = self.root / "old.jpg"
         original.write_bytes(b"rename-me")
         await self.reconciler.reconcile()
-        asset_id = self.repository.image_assets.docs[0]["_id"]
+        asset_id = self.r.assets.collection.docs[0]["_id"]
 
         original.rename(self.root / "new.jpg")
         await self.reconciler.reconcile()
 
-        self.assertEqual(len(self.repository.image_assets.docs), 1)
-        self.assertEqual(self.repository.image_assets.docs[0]["_id"], asset_id)
-        statuses = {obs["relative_path"]: obs["status"] for obs in self.repository.file_observations.docs}
+        self.assertEqual(len(self.r.assets.collection.docs), 1)
+        self.assertEqual(self.r.assets.collection.docs[0]["_id"], asset_id)
+        statuses = {obs["relative_path"]: obs["status"] for obs in self.r.observations.collection.docs}
         self.assertEqual(statuses["old.jpg"], "missing")
         self.assertEqual(statuses["new.jpg"], "active")
 
@@ -87,9 +97,9 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
         image.unlink()
         await self.reconciler.reconcile()
 
-        self.assertEqual(self.repository.file_observations.docs[0]["status"], "missing")
-        self.assertFalse(self.repository.image_assets.docs[0]["active"])
-        self.assertEqual(self.repository.list_active_assets(), [])
+        self.assertEqual(self.r.observations.collection.docs[0]["status"], "missing")
+        self.assertFalse(self.r.assets.collection.docs[0]["active"])
+        self.assertEqual(self.r.assets.list_all(active_only=True), [])
 
     async def test_duplicate_observations_do_not_create_duplicate_processing_jobs(self):
         image = self.root / "one.jpg"
@@ -98,7 +108,7 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.reconciler.observe_file(image)
         await self.reconciler.observe_file(image)
 
-        self.assertEqual(len(self.repository.processing_jobs.docs), 1)
+        self.assertEqual(len(self.r.jobs.collection.docs), 1)
         self.assertEqual(len(self.publisher.messages), 1)
 
     async def test_completed_pipeline_version_is_not_rerun_until_version_changes(self):
@@ -106,13 +116,13 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
         image.write_bytes(b"versioned")
         await self.reconciler.observe_file(image)
 
-        job = self.repository.processing_jobs.docs[0]
-        self.repository.processing_jobs.docs[0]["status"] = "completed"
+        job = self.r.jobs.collection.docs[0]
+        self.r.jobs.collection.docs[0]["status"] = "completed"
         await self.reconciler.observe_file(image)
-        self.assertEqual(len(self.repository.processing_jobs.docs), 1)
+        self.assertEqual(len(self.r.jobs.collection.docs), 1)
 
-        next_reconciler = FilesystemReconciler(
-            repository=self.repository,
+        next_reconciler = _reconciler(
+            self.r,
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="test-root",
@@ -122,14 +132,42 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
             stable_timeout_seconds=1,
         )
         await next_reconciler.observe_file(image)
-        self.assertEqual(len(self.repository.processing_jobs.docs), 2)
-        self.assertEqual(self.repository.processing_jobs.docs[0]["_id"], job["_id"])
+        self.assertEqual(len(self.r.jobs.collection.docs), 2)
+        self.assertEqual(self.r.jobs.collection.docs[0]["_id"], job["_id"])
+
+    async def test_automatic_observe_leaves_a_failed_job_failed(self):
+        # The live filesystem watcher and the periodic full-workspace reconcile
+        # both call observe_file with no override — a deterministic failure
+        # (e.g. a bug that fails identically every time) must not get an
+        # unattended, unlimited supply of fresh retry budgets.
+        image = self.root / "flaky.jpg"
+        image.write_bytes(b"flaky")
+        await self.reconciler.observe_file(image)
+        self.r.jobs.collection.docs[0]["status"] = "failed"
+
+        await self.reconciler.observe_file(image)
+
+        self.assertEqual(self.r.jobs.collection.docs[0]["status"], "failed")
+        self.assertEqual(len(self.publisher.messages), 1)  # only the original dispatch
+
+    async def test_manual_rescan_redispatches_a_failed_job(self):
+        # A human explicitly hitting the workspace's "Scan" button opts in to
+        # retrying jobs that previously failed.
+        image = self.root / "flaky.jpg"
+        image.write_bytes(b"flaky")
+        await self.reconciler.observe_file(image)
+        self.r.jobs.collection.docs[0]["status"] = "failed"
+
+        await self.reconciler.observe_file(image, redispatch_failed=True)
+
+        self.assertEqual(self.r.jobs.collection.docs[0]["status"], "queued")
+        self.assertEqual(len(self.publisher.messages), 2)
 
     async def test_no_pipelines_assigned_ingests_files_without_creating_jobs(self):
         image = self.root / "orphan.jpg"
         image.write_bytes(b"no-pipeline")
-        reconciler = FilesystemReconciler(
-            repository=self.repository,
+        reconciler = _reconciler(
+            self.r,
             publisher=self.publisher,
             workspace_path=str(self.root),
             workspace_id="test-root",
@@ -139,40 +177,85 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         await reconciler.reconcile()
 
-        self.assertEqual(len(self.repository.image_assets.docs), 1)
-        self.assertEqual(len(self.repository.file_observations.docs), 1)
-        self.assertEqual(len(self.repository.processing_jobs.docs), 0)
+        self.assertEqual(len(self.r.assets.collection.docs), 1)
+        self.assertEqual(len(self.r.observations.collection.docs), 1)
+        self.assertEqual(len(self.r.jobs.collection.docs), 0)
         self.assertEqual(self.publisher.messages, [])
 
 
-class ProcessingRetryTests(unittest.TestCase):
-    def test_failed_processing_retries_three_times_then_marks_failed(self):
-        repository = InMemoryPipelineRepository()
-        asset = repository.upsert_asset(
-            content_sha256="abc",
-            mime_type="image/jpeg",
-            size_bytes=3,
-            current_path="/missing.jpg",
-        )
-        job, _ = repository.ensure_processing_job(
-            asset_id=asset["_id"],
-            pipeline_id="default_image_analysis",
+class ReconciliationEventTests(unittest.IsolatedAsyncioTestCase):
+    """A newly-discovered image's job announces itself as 'queued' immediately —
+    previously an implicit side effect of the god-repository's own
+    ensure_processing_job/requeue_job, now explicit emission by the service."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.r = new_repos()
+        self.publisher = FakePublisher()
+        self.events = []
+        sink = EventSink()
+        sink.set(self.events.append)
+        self.reconciler = _reconciler(
+            self.r,
+            publisher=self.publisher,
+            workspace_path=str(self.root),
+            workspace_id="test-root",
+            pipeline_id="test-pipeline",
             pipeline_version="v1",
+            stable_interval_seconds=0.01,
+            stable_timeout_seconds=1,
+            event_sink=sink,
         )
 
-        statuses = []
-        for _ in range(3):
-            started = repository.start_job(job["_id"])
-            statuses.append(
-                repository.fail_job(
-                    job["_id"],
-                    started["pipeline_run_id"],
-                    {"class": "RuntimeError", "message": "boom"},
-                )
-            )
+    async def asyncTearDown(self):
+        self.tmp.cleanup()
 
-        self.assertEqual(statuses, ["queued", "queued", "failed"])
-        self.assertEqual(repository.get_job(job["_id"])["status"], "failed")
+    def _queued_events(self):
+        return [e for e in self.events if e.data.get("state") == "queued"]
+
+    async def test_newly_discovered_image_announces_queued(self):
+        image = self.root / "new.jpg"
+        image.write_bytes(b"new-image")
+
+        await self.reconciler.observe_file(image)
+
+        queued = self._queued_events()
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0].pipeline_id, "test-pipeline")
+        self.assertIsNotNone(queued[0].asset_id)
+
+    async def test_rescanning_an_untouched_job_emits_nothing(self):
+        image = self.root / "seen.jpg"
+        image.write_bytes(b"seen-image")
+        await self.reconciler.observe_file(image)
+        self.events.clear()
+
+        await self.reconciler.observe_file(image)  # no change: same job, not failed
+
+        self.assertEqual(self._queued_events(), [])
+
+    async def test_manual_redispatch_of_a_failed_job_announces_queued_again(self):
+        image = self.root / "flaky.jpg"
+        image.write_bytes(b"flaky")
+        await self.reconciler.observe_file(image)
+        self.r.jobs.collection.docs[0]["status"] = "failed"
+        self.events.clear()
+
+        await self.reconciler.observe_file(image, redispatch_failed=True)
+
+        self.assertEqual(len(self._queued_events()), 1)
+
+    async def test_automatic_rescan_of_a_failed_job_emits_nothing(self):
+        image = self.root / "flaky.jpg"
+        image.write_bytes(b"flaky")
+        await self.reconciler.observe_file(image)
+        self.r.jobs.collection.docs[0]["status"] = "failed"
+        self.events.clear()
+
+        await self.reconciler.observe_file(image)  # no redispatch_failed
+
+        self.assertEqual(self._queued_events(), [])
 
 
 if __name__ == "__main__":
