@@ -18,8 +18,12 @@ api = [
     "watchdog==2.1.9",
 ]
 pipeline-worker = [
-    "torch>=2.9.0",
-    "torchvision",
+    # Pinned as a matched pair — torch/torchvision aren't independently
+    # versioned, and an unpinned torchvision let the resolver pick a release
+    # too old to have a wheel on the Windows CUDA index (see tool.uv.sources
+    # below), even though it satisfied every other constraint.
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "ultralytics>=8.3,<8.4",
     "clip @ git+https://github.com/openai/CLIP.git",
     "transformers==4.52.4",
@@ -34,3 +38,17 @@ file-watcher = [
 dev = [
     "pixquery-backend[api,pipeline-worker,file-watcher]",
 ]
+
+# CUDA-enabled torch/torchvision on Windows only — PyPI's own wheels are CPU-only
+# there (unlike the historical default). Docker/Linux stays on the default PyPI
+# (CPU) index deliberately: docker-compose.yml doesn't pass a GPU through to the
+# pipeline-worker container, so pulling a ~2.4GB CUDA wheel there would only slow
+# builds without ever being used.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
