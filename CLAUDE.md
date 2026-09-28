@@ -27,6 +27,8 @@ cd backend && python -m src.migrations              # run pending DB migrations 
 cd backend && python -m unittest discover tests     # all backend tests
 cd backend && python -m unittest tests.test_dynamic_pipeline   # single test file
 cd frontend && npm test                             # Jest / React Testing Library
+cd backend && .venv/Scripts/python.exe -m coverage run -m unittest discover tests && .venv/Scripts/python.exe -m coverage report   # coverage (fails under the ratchet in pyproject.toml)
+cd frontend && npm run test:coverage                # frontend coverage (thresholds in package.json "jest.coverageThreshold")
 ```
 
 ### Frontend

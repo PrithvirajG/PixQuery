@@ -49,6 +49,9 @@
       "^react-router$": "<rootDir>/node_modules/react-router/dist/development/index.js",
       "^react-router/dom$": "<rootDir>/node_modules/react-router/dist/development/dom-export.js",
       "^axios$": "<rootDir>/node_modules/axios/dist/node/axios.cjs"
+    },
+    "coverageThreshold": {
+      "global": { "statements": 70, "branches": 62, "functions": 60, "lines": 72 }
     }
   },
   "browserslist": {
