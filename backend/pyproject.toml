@@ -37,6 +37,7 @@ file-watcher = [
 [dependency-groups]
 dev = [
     "pixquery-backend[api,pipeline-worker,file-watcher]",
+    "coverage>=7.6",
 ]
 
 # CUDA-enabled torch/torchvision on Windows only — PyPI's own wheels are CPU-only
@@ -52,3 +53,10 @@ torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
