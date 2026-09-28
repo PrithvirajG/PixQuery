@@ -116,6 +116,15 @@ class SubscriberLifecycleTests(unittest.TestCase):
             self.assertIsNone(asyncio.run(es.get_subscriber()))
 
     def test_subscriber_is_created_once_and_reset_closes_it(self):
+        original_subscriber = es._subscriber
+        original_lock = es._subscriber_lock
+
+        def _restore():
+            es._subscriber = original_subscriber
+            es._subscriber_lock = original_lock
+
+        self.addCleanup(_restore)
+
         created = []
 
         class Consumer:

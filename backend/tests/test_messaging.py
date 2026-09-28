@@ -165,7 +165,11 @@ class EventPublisherTests(unittest.TestCase):
             with mock.patch.object(event_publisher_mod, "_connect_with_retry", mock.AsyncMock(return_value=conn)):
                 await pub.connect()
             pub.emit(Event(type="pipeline.state", workspace_id="w1"))
-            await asyncio.sleep(0.05)
+            # emit() hands off via call_soon_threadsafe, so give the loop one
+            # tick to actually enqueue the item before joining on it — join()
+            # returns immediately if the queue has nothing outstanding yet.
+            await asyncio.sleep(0)
+            await pub._queue.join()  # deterministic wait for the drain task to publish it
             await pub.close()
 
         run(go())
@@ -185,7 +189,10 @@ class EventPublisherTests(unittest.TestCase):
                 await pub.connect()
             pub.emit(Event(type="first"))
             pub.emit(Event(type="second"))
-            await asyncio.sleep(0.05)
+            # emit() hands off via call_soon_threadsafe, so give the loop one
+            # tick to actually enqueue both items before joining on them.
+            await asyncio.sleep(0)
+            await pub._queue.join()  # deterministic wait for the drain task to publish both
             await pub.close()
 
         run(go())

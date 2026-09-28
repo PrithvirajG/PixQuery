@@ -112,8 +112,7 @@ class ScanAndClearTests(RbacFixture):
 
     def test_editor_clear_returns_counts(self):
         counts = self.svc.clear_pipeline_outputs(self.wid, "p1", owner_id=self.editor["_id"])
-        # jobs are intentionally kept (see clear_pipeline_outputs' docstring) so reconciliation regenerates cleared outputs
-        self.assertEqual(set(counts), {"outputs_deleted", "runs_deleted"})
+        self.assertEqual(set(counts), {"outputs_deleted", "runs_deleted", "jobs_deleted"})
 
 
 class MembershipTests(RbacFixture):
@@ -131,14 +130,15 @@ class MembershipTests(RbacFixture):
         self.assertIn("(unknown)", names)
 
     def test_only_owner_manages_members(self):
-        for call in (
-            lambda: self.svc.add_member(self.wid, actor_id=self.editor["_id"], username="carol", role="viewer"),
-            lambda: self.svc.update_member_role(self.wid, self.viewer["_id"], actor_id=self.editor["_id"], role="editor"),
-            lambda: self.svc.remove_member(self.wid, self.viewer["_id"], actor_id=self.editor["_id"]),
-            lambda: self.svc.search_users_for_workspace(self.wid, actor_id=self.viewer["_id"], query="c"),
+        for label, call in (
+            ("add_member", lambda: self.svc.add_member(self.wid, actor_id=self.editor["_id"], username="carol", role="viewer")),
+            ("update_member_role", lambda: self.svc.update_member_role(self.wid, self.viewer["_id"], actor_id=self.editor["_id"], role="editor")),
+            ("remove_member", lambda: self.svc.remove_member(self.wid, self.viewer["_id"], actor_id=self.editor["_id"])),
+            ("search_users_for_workspace", lambda: self.svc.search_users_for_workspace(self.wid, actor_id=self.viewer["_id"], query="c")),
         ):
-            with self.assertRaises(WorkspaceAccessError):
-                call()
+            with self.subTest(call=label):
+                with self.assertRaises(WorkspaceAccessError):
+                    call()
 
     def test_add_member(self):
         members = self.svc.add_member(self.wid, actor_id=self.owner["_id"], username="carol", role="editor")

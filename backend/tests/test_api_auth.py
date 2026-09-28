@@ -152,7 +152,7 @@ class CurrentUserTests(unittest.TestCase):
     def test_forged_token_is_401(self):
         forged = jwt.encode({"sub": self.user["_id"]}, "x" * 32, algorithm="HS256")
         res = self._me({"Authorization": f"Bearer {forged}"})
-        self.assertEqual(res.status_code, 401)
+        self.assertEqual((res.status_code, res.json()["code"]), (401, "unauthorized"))
 
     def test_token_without_subject_is_401(self):
         token = security.create_access_token({"name": "alice"})

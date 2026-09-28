@@ -153,8 +153,9 @@ describe('WorkspacesView members modal', () => {
 
     await waitFor(() => {
       expect(axios.post).toHaveBeenCalledWith(expect.stringMatching(/\/workspaces\/w1\/members$/), { username: 'carol', role: 'editor' });
-      expect(screen.getByText('carol')).toBeInTheDocument();
+      expect(screen.queryByText('add as editor')).not.toBeInTheDocument();
     });
+    expect(screen.getByText('carol')).toBeInTheDocument();
   });
 
   test('no matches shows a hint', async () => {

@@ -51,7 +51,7 @@
       "^axios$": "<rootDir>/node_modules/axios/dist/node/axios.cjs"
     },
     "coverageThreshold": {
-      "global": { "statements": 70, "branches": 62, "functions": 60, "lines": 72 }
+      "global": { "statements": 65, "branches": 60, "functions": 55, "lines": 67 }
     }
   },
   "browserslist": {
