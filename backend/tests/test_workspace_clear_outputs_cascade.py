@@ -57,18 +57,20 @@ class ClearPipelineOutputsCascadeTests(unittest.TestCase):
 
     def test_clears_only_the_targeted_pipeline(self):
         result = _service(self.r).clear_pipeline_outputs(self.ws["_id"], "p1", owner_id="owner-1")
-        self.assertEqual(result, {"outputs_deleted": 1, "runs_deleted": 1, "jobs_deleted": 1})
+        self.assertEqual(result, {"outputs_deleted": 1, "runs_deleted": 1})
 
         remaining = list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]}))
         self.assertEqual([o["pipeline_id"] for o in remaining], ["p2"])
         remaining_runs = self.r.runs.list_for_job(self.job_a_p1["_id"])
         self.assertEqual(remaining_runs, [])
 
-    def test_deletes_job_so_pair_returns_to_not_started(self):
+    def test_keeps_the_jobs_so_the_reconciler_does_not_rebuild_the_outputs(self):
+        # The job row is the reconciler's "already handled" marker; deleting it made
+        # the next reconcile regenerate everything just cleared
+        # (see test_clear_survives_reconcile.py). Both pipelines' jobs stay untouched.
         _service(self.r).clear_pipeline_outputs(self.ws["_id"], "p1", owner_id="owner-1")
-        self.assertIsNone(self.r.jobs.get(self.job_a_p1["_id"]))
-        other_job = self.r.jobs.get(self.job_a_p2["_id"])
-        self.assertEqual(other_job["status"], "completed")
+        self.assertEqual(self.r.jobs.get(self.job_a_p1["_id"])["status"], "completed")
+        self.assertEqual(self.r.jobs.get(self.job_a_p2["_id"])["status"], "completed")
 
     def test_does_not_touch_other_workspaces(self):
         other_ws = self.r.workspaces.create(owner_id="owner-1", name="B", workspace_path="/b")
@@ -107,7 +109,7 @@ class ClearPipelineOutputsCascadeTests(unittest.TestCase):
         self.assertEqual(event.pipeline_id, "p1")
         self.assertIsNone(event.asset_id)  # workspace-wide clear, not scoped to one image
         self.assertEqual(event.data["scope"], "workspace")
-        self.assertEqual(event.data["counts"], {"outputs_deleted": 1, "runs_deleted": 1, "jobs_deleted": 1})
+        self.assertEqual(event.data["counts"], {"outputs_deleted": 1, "runs_deleted": 1})
 
     def test_no_event_when_nothing_matched(self):
         sink = EventSink()
@@ -119,7 +121,7 @@ class ClearPipelineOutputsCascadeTests(unittest.TestCase):
         # An event still fires (zero counts) — the UI needs to know the clear
         # happened even if there was nothing to clear.
         self.assertEqual(len(emitted), 1)
-        self.assertEqual(emitted[0].data["counts"], {"outputs_deleted": 0, "runs_deleted": 0, "jobs_deleted": 0})
+        self.assertEqual(emitted[0].data["counts"], {"outputs_deleted": 0, "runs_deleted": 0})
 
 
 def _seed_processed_asset(r, *, sha, path, workspace_id, pipeline_id):
@@ -153,7 +155,7 @@ class ClearAssetPipelineOutputsCascadeTests(unittest.TestCase):
 
     def test_reports_what_it_deleted(self):
         result = _service(self.r).clear_asset_pipeline_outputs(self.asset["_id"], "p1", owner_id="owner-1")
-        self.assertEqual(result, {"outputs_deleted": 1, "runs_deleted": 1, "jobs_deleted": 1})
+        self.assertEqual(result, {"outputs_deleted": 1, "runs_deleted": 1})
 
     def test_leaves_other_images_in_the_same_workspace_alone(self):
         _service(self.r).clear_asset_pipeline_outputs(self.asset["_id"], "p1", owner_id="owner-1")
@@ -181,9 +183,9 @@ class ClearAssetPipelineOutputsCascadeTests(unittest.TestCase):
         remaining = list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]}))
         self.assertEqual([o["pipeline_id"] for o in remaining], ["p2"])
 
-    def test_the_pair_returns_to_not_started(self):
+    def test_keeps_the_pairs_job_so_the_reconciler_does_not_rebuild_the_outputs(self):
         _service(self.r).clear_asset_pipeline_outputs(self.asset["_id"], "p1", owner_id="owner-1")
-        self.assertIsNone(self.r.jobs.get(self.job["_id"]))
+        self.assertEqual(self.r.jobs.get(self.job["_id"])["status"], "completed")
 
     def test_sweeps_outputs_that_predate_the_denormalized_pipeline_id(self):
         """Older rows carry no pipeline_id and are reachable only via their run."""
@@ -199,7 +201,7 @@ class ClearAssetPipelineOutputsCascadeTests(unittest.TestCase):
 
     def test_clearing_an_untouched_pair_is_a_harmless_no_op(self):
         result = _service(self.r).clear_asset_pipeline_outputs(self.asset["_id"], "never-ran", owner_id="owner-1")
-        self.assertEqual(result, {"outputs_deleted": 0, "runs_deleted": 0, "jobs_deleted": 0})
+        self.assertEqual(result, {"outputs_deleted": 0, "runs_deleted": 0})
 
     def test_emits_outputs_cleared_scoped_to_the_asset(self):
         sink = EventSink()

@@ -46,6 +46,25 @@ async def get_thumbnail(
     return FileResponse(str(path), media_type=asset.get("mime_type") or "image/jpeg")
 
 
+@router.get("/{asset_id}/outputs/{output_id}/file")
+async def get_written_image(
+    asset_id: str,
+    output_id: str,
+    image_service: ImageService = Depends(get_image_service),
+):
+    """Serve the file an ``image_write`` stage saved, so the UI can show it.
+
+    Unauthenticated for the same reason as ``/thumbnail`` above — it loads in an
+    ``<img>`` tag, which can't carry the Bearer token — and protected the same
+    way: both ids are unguessable UUIDs. The path itself comes from the stored
+    output row, never from the request.
+    """
+    path = image_service.written_image_path(asset_id, output_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Written image not found")
+    return FileResponse(str(path))
+
+
 @router.get("/{asset_id}/detail")
 async def get_image_detail(
     asset_id: str,

@@ -144,22 +144,15 @@ class ProcessingJobsRepository:
     def count_by_status(self, asset_ids: list[str], status: str) -> int:
         return self.collection.count_documents({"asset_id": {"$in": asset_ids}, "status": status})
 
-    def delete_for_workspace_pipeline(self, workspace_id: str, pipeline_id: str) -> tuple[list[str], int]:
-        """Delete every job for this (workspace, pipeline) pair; returns (their ids, count deleted).
-
-        Ids are returned pre-deletion so the caller can cascade to pipeline_runs/model_outputs
-        keyed by job_id before those rows lose their only link back.
-        """
+    def ids_for_workspace_pipeline(self, workspace_id: str, pipeline_id: str) -> list[str]:
+        """Ids of every job for this (workspace, pipeline) pair, across all versions."""
         query = {"workspace_id": workspace_id, "pipeline_id": pipeline_id}
-        job_ids = [j["_id"] for j in self.collection.find(query)]
-        deleted = self.collection.delete_many(query).deleted_count
-        return job_ids, deleted
+        return [j["_id"] for j in self.collection.find(query)]
 
-    def delete_for_asset_pipeline(self, asset_id: str, pipeline_id: str) -> tuple[list[str], int]:
+    def ids_for_asset_pipeline(self, asset_id: str, pipeline_id: str) -> list[str]:
+        """Ids of every job for this (asset, pipeline) pair, across all versions."""
         query = {"asset_id": asset_id, "pipeline_id": pipeline_id}
-        job_ids = [j["_id"] for j in self.collection.find(query)]
-        deleted = self.collection.delete_many(query).deleted_count
-        return job_ids, deleted
+        return [j["_id"] for j in self.collection.find(query)]
 
     def delete_for_pipeline(self, pipeline_id: str) -> int:
         return self.collection.delete_many({"pipeline_id": pipeline_id}).deleted_count

@@ -175,7 +175,7 @@ class MetadataAlwaysExtractedTests(unittest.TestCase):
             content_sha256="h", mime_type="image/png", size_bytes=1,
             current_path=str(self.img),
         )
-        # A no-op node so the empty-pipeline default chain doesn't kick in.
+        # A no-op node: a pipeline with no stages has nothing to run (it fails).
         self.noop = self.r.nodes.create(
             name="Noop", description="", node_type="noop",
             context_inputs=["image"], context_outputs=[],

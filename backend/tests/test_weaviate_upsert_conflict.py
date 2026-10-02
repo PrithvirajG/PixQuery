@@ -32,7 +32,13 @@ def _success_response(body=b""):
 
 class WeaviateUpsertConflictTests(unittest.TestCase):
     def setUp(self):
-        patcher = patch.object(WeaviateEmbeddingStore, "ensure_schema", lambda self: None)
+        # This file is about the 409/422-falls-back-to-PUT behavior of _upsert,
+        # not schema creation — _ensure_class (called both at construction, via
+        # ensure_schema(), and again per-upsert to route to the right model's
+        # class) is stubbed out so neither path makes its own schema request,
+        # which would otherwise eat into the urlopen side_effect queue these
+        # tests set up for the object create/update calls.
+        patcher = patch.object(WeaviateEmbeddingStore, "_ensure_class", lambda self, *a: None)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.store = WeaviateEmbeddingStore(url="http://weaviate.test")

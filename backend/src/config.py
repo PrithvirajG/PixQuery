@@ -20,6 +20,12 @@ DEFAULT_PIPELINE_VERSION = os.getenv("PIPELINE_VERSION", "v1")
 # source images. Custom absolute output paths are the user's responsibility.
 PIPELINE_OUTPUT_DIRNAME = os.getenv("PIPELINE_OUTPUT_DIRNAME", "pixquery_output")
 
+# Where model weights PixQuery downloads itself (e.g. YuNet's ONNX file) are cached.
+# Libraries with their own cache (ultralytics, torchvision, insightface) keep theirs.
+MODEL_CACHE_DIR = os.path.abspath(
+    os.path.expanduser(os.getenv("MODEL_CACHE_DIR", "~/.cache/pixquery/models"))
+)
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "pixquery")
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
@@ -29,7 +35,14 @@ RABBITMQ_CONNECT_TIMEOUT = float(os.getenv("RABBITMQ_CONNECT_TIMEOUT", "60"))
 # Run pending DB migrations automatically when the API starts. Set to "false" to
 # manage migrations explicitly via `python -m src.migrations` (e.g. as a deploy step).
 RUN_MIGRATIONS_ON_STARTUP = os.getenv("RUN_MIGRATIONS_ON_STARTUP", "true").lower() in ("1", "true", "yes")
-SCAN_COMMAND_QUEUE = os.getenv("SCAN_COMMAND_QUEUE", "scan_commands")
+# Carries one {"workspace_id", "path", "redispatch_failed"} message per file —
+# published by the API's manual "Scan" route and the live filesystem watcher's
+# per-event handler, both of which only list/detect, never hash or create jobs.
+# Consumed by the pipeline-worker's FileObservationConsumer, which does the
+# actual hash/upsert/job-create via ReconciliationService.observe_file. See
+# CLAUDE.md's architecture notes on why listing and per-file ingestion are
+# split across processes this way.
+FILE_OBSERVATION_QUEUE = os.getenv("FILE_OBSERVATION_QUEUE", "file_observations")
 # Fanout exchange carrying live UI events (job state changes, stage completions,
 # output deletions) from the worker/monitor processes to the API's WebSockets.
 EVENTS_EXCHANGE = os.getenv("EVENTS_EXCHANGE", "pixquery.events")

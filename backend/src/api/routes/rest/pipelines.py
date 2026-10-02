@@ -13,6 +13,9 @@ router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 class PipelineNodeRef(BaseModel):
     pipeline_node_id: str
     config_overrides: dict[str, Any] = {}
+    # One of the node type's advertised model ids (GET /pipeline-nodes → models);
+    # omit for the executor's default.
+    model: str | None = None
     node_id: str | None = None
     position: dict[str, Any] | None = None
 

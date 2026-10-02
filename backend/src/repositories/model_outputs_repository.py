@@ -47,6 +47,9 @@ class ModelOutputsRepository:
         self.collection.insert_one(output)
         return output
 
+    def get(self, output_id: str) -> dict[str, Any] | None:
+        return self.collection.find_one({"_id": output_id})
+
     def list_for_asset(self, asset_id: str) -> list[dict[str, Any]]:
         return list(self.collection.find({"asset_id": asset_id}))
 

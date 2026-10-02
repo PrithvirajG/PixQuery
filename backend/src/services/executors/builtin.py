@@ -10,162 +10,304 @@ from pathlib import Path
 from typing import Any
 
 from src.errors.executors import NodeExecutionError
-from src.services.executors.base import BaseNodeExecutor
+from src.services.executors.base import BaseNodeExecutor, ModelSpec
 
 
 class ObjectDetectionExecutor(BaseNodeExecutor):
+    """YOLOv8 object detection (ultralytics). Weights download on first use.
+
+    Config: ``confidence`` — minimum detection score (default 0.25, YOLO's own
+    default). ``threshold`` is accepted as a legacy alias.
+    """
+
     node_type = "object_detection"
-    model_name = "yolo"
-    model_version = "v8n"
+    kind = "model"
+    outputs_label = "bounding boxes + labels"
+    models = (
+        ModelSpec("yolov8n", "YOLOv8n", "ultralytics-v8"),
+        ModelSpec("yolov8s", "YOLOv8s", "ultralytics-v8"),
+        ModelSpec("yolov8m", "YOLOv8m", "ultralytics-v8"),
+    )
+    default_model = "yolov8n"
 
     def __init__(self) -> None:
-        self._model = None
+        self._models: dict[str, Any] = {}
 
-    def _get_model(self):
-        if self._model is None:
+    def _get_model(self, model_id: str):
+        if model_id not in self._models:
+            import os
+
+            from src.config import MODEL_CACHE_DIR
             from src.infrastructure.ml.yolo import YoloModel
 
-            self._model = YoloModel()
-        return self._model
+            # A full path makes ultralytics download missing weights there rather
+            # than into the process's working directory.
+            os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+            weights = os.path.join(MODEL_CACHE_DIR, f"{model_id}.pt")
+            self._models[model_id] = YoloModel(model_path=weights)
+        return self._models[model_id]
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        detections = self._get_model().detect(image=context["image"], write_image=False)
+        model = self._get_model(self.resolve_model(config).id)
+        conf = float(config.get("confidence", config.get("threshold", 0.25)))
+        detections = model.detect(image=context["image"], write_image=False, conf=conf)
         return {"detections": detections or []}
 
 
 class FaceDetectionExecutor(BaseNodeExecutor):
-    """Detect faces with OpenCV's Haar cascade (ships with cv2 — no download).
+    """Detect faces with a choice of detector (YuNet, SCRFD, RetinaFace-R50).
 
     Emits under the ``detections`` key (label ``"face"``) using the same
     center-based ``[x_c, y_c, w, h]`` absolute-pixel bbox as object detection
-    (YOLO ``xywh``), so it persists as an ``detections`` output and the existing
-    image-detail overlay renders face boxes with no frontend change. Haar has no
-    real confidence, so it's reported as 1.0.
+    (YOLO ``xywh``), so it persists as a ``detections`` output and the existing
+    image-detail overlay renders face boxes with no frontend change.
+
+    Config: ``confidence_threshold`` — minimum face score (default 0.5).
     """
 
     node_type = "face_detection"
-    model_name = "opencv_haar"
-    model_version = "frontalface_default"
+    kind = "model"
+    outputs_label = "bounding boxes"
+    models = (
+        ModelSpec("yunet", "YuNet", "2023mar"),
+        ModelSpec("scrfd", "SCRFD", "10g-buffalo_l"),
+        ModelSpec("retinaface_r50", "RetinaFace-R50", "batch-face"),
+    )
+    default_model = "retinaface_r50"
 
     def __init__(self) -> None:
-        self._cascade = None
+        self._detectors: dict[str, Any] = {}
 
-    def _get_cascade(self):
-        if self._cascade is None:
-            import os
+    def _get_detector(self, model_id: str):
+        if model_id not in self._detectors:
+            from src.infrastructure.ml import face_detectors
 
-            import cv2
-
-            path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-            self._cascade = cv2.CascadeClassifier(path)
-        return self._cascade
+            cls = {
+                "yunet": face_detectors.YuNetFaceDetector,
+                "scrfd": face_detectors.ScrfdFaceDetector,
+                "retinaface_r50": face_detectors.RetinaFaceDetector,
+            }[model_id]
+            self._detectors[model_id] = cls()
+        return self._detectors[model_id]
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        import cv2
-        import numpy as np
-
-        gray = cv2.cvtColor(np.array(context["image"]), cv2.COLOR_RGB2GRAY)
-        rects = self._get_cascade().detectMultiScale(
-            gray,
-            scaleFactor=float(config.get("scale_factor", 1.1)),
-            minNeighbors=int(config.get("min_neighbors", 5)),
-            minSize=(int(config.get("min_size", 30)), int(config.get("min_size", 30))),
-        )
+        detector = self._get_detector(self.resolve_model(config).id)
+        threshold = float(config.get("confidence_threshold", 0.5))
         detections = [
             {
-                "bbox": [float(x + w / 2), float(y + h / 2), float(w), float(h)],
+                "bbox": [
+                    (box.x1 + box.x2) / 2,
+                    (box.y1 + box.y2) / 2,
+                    box.x2 - box.x1,
+                    box.y2 - box.y1,
+                ],
                 "label": "face",
-                "confidence": 1.0,
+                "confidence": box.score,
             }
-            for (x, y, w, h) in rects
+            for box in detector.detect(context["image"], threshold)
         ]
         return {"detections": detections}
 
 
-class ClassificationExecutor(BaseNodeExecutor):
-    """Whole-image classification with a torchvision MobileNetV3 (ImageNet-1k).
+# model id → (torchvision builder, weights enum) — both ImageNet-1k, so every
+# choice carries its own 1000 category names and there's no label map to keep.
+_CLASSIFIERS = {
+    "resnet50": ("resnet50", "ResNet50_Weights"),
+    "efficientnet_b0": ("efficientnet_b0", "EfficientNet_B0_Weights"),
+    "vit_b_16": ("vit_b_16", "ViT_B_16_Weights"),
+}
 
-    MobileNetV3-Small is light (~10 MB) and its weights carry the 1000 category
-    names, so there's no label mapping to maintain. Weights download once on first
-    use, matching how YOLO/BLIP/CLIP already fetch theirs.
+
+class ClassificationExecutor(BaseNodeExecutor):
+    """Whole-image ImageNet-1k classification with a torchvision model.
+
+    Weights download once on first use, matching how YOLO/BLIP/CLIP fetch theirs.
+
+    Config: ``top_k`` — how many labels to return (default 5).
     """
 
     node_type = "classification"
-    model_name = "mobilenet_v3_small"
-    model_version = "imagenet1k"
+    kind = "model"
+    outputs_label = "labels + confidence scores"
+    models = (
+        ModelSpec("resnet50", "ResNet-50", "imagenet1k"),
+        ModelSpec("efficientnet_b0", "EfficientNet-B0", "imagenet1k"),
+        ModelSpec("vit_b_16", "ViT-B/16", "imagenet1k"),
+    )
+    default_model = "efficientnet_b0"
 
     def __init__(self) -> None:
-        self._model = None
-        self._preprocess = None
-        self._categories = None
+        # model id → (model, preprocess transform, category names)
+        self._loaded: dict[str, tuple[Any, Any, list[str]]] = {}
 
-    def _load(self):
-        if self._model is None:
-            from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
+    def _load(self, model_id: str):
+        if model_id not in self._loaded:
+            import torchvision.models as tvm
 
-            weights = MobileNet_V3_Small_Weights.DEFAULT
-            self._model = mobilenet_v3_small(weights=weights).eval()
-            self._preprocess = weights.transforms()
-            self._categories = weights.meta["categories"]
-        return self._model
+            builder_name, weights_name = _CLASSIFIERS[model_id]
+            weights = getattr(tvm, weights_name).DEFAULT
+            model = getattr(tvm, builder_name)(weights=weights).eval()
+            self._loaded[model_id] = (model, weights.transforms(), weights.meta["categories"])
+        return self._loaded[model_id]
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         import torch
 
-        model = self._load()
+        model, preprocess, categories = self._load(self.resolve_model(config).id)
         top_k = int(config.get("top_k", 5))
-        batch = self._preprocess(context["image"]).unsqueeze(0)
+        batch = preprocess(context["image"].convert("RGB")).unsqueeze(0)
         with torch.no_grad():
             probs = torch.softmax(model(batch)[0], dim=0)
         top = torch.topk(probs, min(top_k, probs.shape[0]))
         labels = [
-            {"label": self._categories[int(idx)], "confidence": float(score)}
+            {"label": categories[int(idx)], "confidence": float(score)}
             for score, idx in zip(top.values, top.indices)
         ]
         return {"labels": labels}
 
 
-class CaptioningExecutor(BaseNodeExecutor):
-    node_type = "captioning"
-    model_name = "blip"
-    model_version = "image-captioning-base"
+# OCR runs a single model today (more are planned), so it lists just that one.
+# Its id matches its historical provenance name so existing model_outputs rows
+# stay consistent.
+
+class VisionLanguageModelExecutor(BaseNodeExecutor):
+    """Produces a text caption from the image — via a fixed-task captioner
+    (BLIP) or a real instruction-following vision-language model that answers
+    the node's configured ``prompt`` (Qwen2-VL-2B-Instruct, Moondream2).
+
+    Was "Captioning" / node_type "captioning" (renamed by migration
+    0003_rename_captioning_to_vision_language_model, same _id — see its
+    docstring for why existing pipelines keep working transparently). The
+    output context key stays ``caption`` regardless of model or prompt — search
+    indexes it under that key (``SearchService._captions_map``) and Embedding
+    auto-embeds it as text (``EmbeddingExecutor`` reading ``context["caption"]``)
+    — so whatever a custom prompt actually asks ("what brand is visible",
+    "transcribe the sign"), the answer becomes searchable the same way a caption
+    would.
+
+    ``ModelSpec.supports_prompt`` is what distinguishes the two kinds: False for
+    BLIP (no instruction-following — the prompt field does nothing and the
+    inspector shouldn't show it), True for a real VLM (the prompt drives what
+    question gets asked). The node's ``prompt`` config is passed to every
+    model's ``describe()`` either way, via one call path; a model that ignores
+    it (BLIP) and one that uses it are not special-cased here.
+    """
+
+    node_type = "vision_language_model"
+    kind = "model"
+    outputs_label = "text caption"
+    # Qwen2-VL-2B-Instruct and Moondream2 both follow a custom prompt correctly
+    # (verified) but both measured ~5GB peak VRAM in fp16 — over a 4GB card's
+    # limit, so a small GPU pages into slow shared memory (~115s/prompt rather
+    # than a few seconds). Shipped as-is (correct, just GPU-hungry) rather than
+    # block the feature on this; a lighter/quantized option is future work, not
+    # done — see "Vision Language Model — GPU Memory Fit (Parked)" in the
+    # Obsidian vault before re-evaluating which models belong here.
+    models = (
+        ModelSpec("blip", "BLIP", "image-captioning-base"),
+        ModelSpec(
+            "qwen2_vl_2b", "Qwen2-VL-2B-Instruct", "Qwen/Qwen2-VL-2B-Instruct",
+            supports_prompt=True,
+        ),
+        ModelSpec(
+            "moondream2", "Moondream2", "vikhyatk/moondream2",
+            supports_prompt=True,
+        ),
+    )
+    default_model = "blip"
 
     def __init__(self) -> None:
-        self._model = None
+        self._models: dict[str, Any] = {}
 
-    def _get_model(self):
-        if self._model is None:
-            from src.infrastructure.ml.blip import BlipModel
+    def _get_model(self, model_id: str):
+        if model_id not in self._models:
+            if model_id == "blip":
+                from src.infrastructure.ml.blip import BlipModel
 
-            self._model = BlipModel()
-        return self._model
+                self._models[model_id] = BlipModel()
+            elif model_id == "qwen2_vl_2b":
+                from src.infrastructure.ml.qwen_vl import Qwen2VLModel
+
+                self._models[model_id] = Qwen2VLModel()
+            elif model_id == "moondream2":
+                from src.infrastructure.ml.moondream import MoondreamModel
+
+                self._models[model_id] = MoondreamModel()
+            else:
+                raise PermanentNodeError(f"No loader for vision-language model '{model_id}'")
+        return self._models[model_id]
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        return {"caption": self._get_model().describe(context["image"]) or ""}
+        spec = self.resolve_model(config)
+        model = self._get_model(spec.id)
+        prompt = config.get("prompt") if spec.supports_prompt else None
+        return {"caption": model.describe(context["image"], prompt=prompt) or ""}
+
+
+# model id -> the CLIP variant name clip.load() expects. Both CLIP models share
+# one wrapper class; only the loaded weights differ.
+_CLIP_VARIANTS = {"clip": "ViT-B/32", "clip_vit_l14": "ViT-L/14"}
 
 
 class EmbeddingExecutor(BaseNodeExecutor):
+    """Produces an image (and, when a caption is present, a text) embedding.
+
+    Model choice matters more here than for the other AI nodes: each model's
+    vectors live in their own Weaviate class (see
+    ``infrastructure/vector_store/weaviate.py``'s ``image_class_name``/
+    ``text_class_name``), because Weaviate's HNSW index requires every vector in
+    a class to share one length, and CLIP ViT-B/32 (512-d), CLIP ViT-L/14 (768-d)
+    and DINOv2 (768-d, a different space despite the matching length) are not
+    interchangeable. ``run`` reports which model produced the vectors
+    (``embedding_model``) so the caller can route storage/search to the right
+    space; DINOv2 has no text tower (``supports_text=False``), so no
+    ``text_embedding`` is ever produced for it, regardless of whether a caption
+    is present — that asset simply isn't reachable by a text query, only by
+    keyword/OCR, same as an asset with no caption at all.
+    """
+
     node_type = "embedding"
-    model_name = "clip"
-    model_version = "ViT-B/32"
+    kind = "model"
+    outputs_label = "vector embedding"
+    models = (
+        ModelSpec("clip", "CLIP ViT-B/32", "ViT-B/32"),
+        ModelSpec("clip_vit_l14", "CLIP ViT-L/14", "ViT-L/14"),
+        ModelSpec("dinov2", "DINOv2", "facebook/dinov2-base", supports_text=False),
+    )
+    default_model = "clip"
 
     def __init__(self) -> None:
-        self._model = None
+        self._models: dict[str, Any] = {}
 
-    def _get_model(self):
-        if self._model is None:
-            from src.infrastructure.ml.clip import ClipModel
+    def _get_model(self, model_id: str):
+        if model_id not in self._models:
+            if model_id in _CLIP_VARIANTS:
+                from src.infrastructure.ml.clip import ClipModel
 
-            self._model = ClipModel()
-        return self._model
+                self._models[model_id] = ClipModel(model_name=_CLIP_VARIANTS[model_id])
+            elif model_id == "dinov2":
+                from src.infrastructure.ml.dinov2 import Dinov2Model
+
+                self._models[model_id] = Dinov2Model()
+            else:
+                raise PermanentNodeError(f"No loader for embedding model '{model_id}'")
+        return self._models[model_id]
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        model = self._get_model()
-        updates: dict[str, Any] = {"embeddings": model.embed(context["image"])}
+        spec = self.resolve_model(config)
+        model = self._get_model(spec.id)
+        updates: dict[str, Any] = {
+            "embeddings": model.embed(context["image"]),
+            # Working state, not a model_output row (_PERSIST_SKIP_KEYS) — read by
+            # PipelineExecutionService._store_embeddings to pick the matching
+            # Weaviate class for this run's vectors.
+            "embedding_model": spec.id,
+        }
         # If a caption is already in context, also embed it so semantic text
-        # search has a vector to match against (mirrors the legacy pipeline).
+        # search has a vector to match against (mirrors the legacy pipeline) —
+        # but only for a model that actually has a text tower.
         caption = context.get("caption")
-        if caption:
+        if caption and spec.supports_text:
             updates["text_embedding"] = model.embed_text(caption)
         return updates
 
@@ -174,6 +316,7 @@ class EmbeddingExecutor(BaseNodeExecutor):
 
 class ResizeExecutor(BaseNodeExecutor):
     node_type = "resize"
+    outputs_label = "image"
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         width = int(config.get("width", 640))
@@ -183,6 +326,7 @@ class ResizeExecutor(BaseNodeExecutor):
 
 class GrayscaleExecutor(BaseNodeExecutor):
     node_type = "grayscale"
+    outputs_label = "image"
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         # Convert to grayscale but keep 3 channels so downstream models still work.
@@ -209,10 +353,15 @@ class ImageWriteExecutor(BaseNodeExecutor):
     one after each transform whose result you want to keep.
 
     Config:
-      - ``directory``: where to save. Absolute paths are used as-is; a relative
-        path (the default) is resolved *inside the source image's folder*, so
-        outputs stay within the workspace. The reconciler skips the default
-        output folder so written images are never re-ingested.
+      - ``directory``: where to save, *within* the managed output folder. Absolute
+        paths are used as-is (an explicit escape hatch — the caller owns keeping
+        those out of any watched workspace). A relative path (the default: none,
+        i.e. the output folder itself) is resolved as a subfolder *under*
+        ``<workspace_root>/pixquery_output/`` — never under the source image's own
+        folder, so a nested source (already inside a subfolder, or itself a
+        previous node's output) doesn't shift where outputs land. This is what
+        keeps the managed folder a single flat root the reconciler can reliably
+        skip, instead of re-nesting one level deeper on every run.
       - ``filename``: template with ``{stem}``, ``{name}``, ``{ext}``, ``{asset}``
         tokens (default ``"{stem}.{ext}"``). Only the basename is used.
       - ``format``: ``jpeg`` | ``png`` | ``webp`` | ``bmp`` | ``tiff`` (default ``jpeg``).
@@ -220,6 +369,7 @@ class ImageWriteExecutor(BaseNodeExecutor):
     """
 
     node_type = "image_write"
+    outputs_label = "file path"
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         image = context.get("image")
@@ -234,11 +384,20 @@ class ImageWriteExecutor(BaseNodeExecutor):
 
         from src.config import PIPELINE_OUTPUT_DIRNAME
 
-        directory = str(config.get("directory") or PIPELINE_OUTPUT_DIRNAME)
-        dir_path = Path(directory).expanduser()
-        if not dir_path.is_absolute():
-            # Relative → inside the source image's directory (i.e. the workspace).
-            dir_path = source.parent / dir_path
+        subdir = config.get("directory")
+        sub_path = Path(str(subdir)).expanduser() if subdir else None
+        if sub_path is not None and sub_path.is_absolute():
+            dir_path = sub_path
+        else:
+            workspace_root = context.get("workspace_root")
+            if not workspace_root:
+                raise NodeExecutionError(
+                    "image_write has no workspace root to anchor its output directory in "
+                    "(and no absolute 'directory' override was given)"
+                )
+            dir_path = Path(str(workspace_root)) / PIPELINE_OUTPUT_DIRNAME
+            if sub_path is not None:
+                dir_path = dir_path / sub_path
         dir_path = dir_path.resolve()
 
         template = str(config.get("filename") or "{stem}.{ext}")
@@ -280,8 +439,10 @@ class ImageWriteExecutor(BaseNodeExecutor):
 
 class OcrExecutor(BaseNodeExecutor):
     node_type = "ocr"
-    model_name = "tesseract"
-    model_version = "pytesseract"
+    kind = "model"
+    outputs_label = "text"
+    models = (ModelSpec("tesseract", "Tesseract", "pytesseract"),)
+    default_model = "tesseract"
 
     def run(self, context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         import pytesseract

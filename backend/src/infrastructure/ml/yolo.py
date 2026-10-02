@@ -11,29 +11,29 @@ class YoloModel(ModelInterface):
         self.model = YOLO(model_path)
         self.logger.info("YOLO model loaded from %s", model_path)
 
-    def detect(self, image: Image.Image, write_image: bool = False) -> list | None:
-        try:
-            self.logger.info("Performing YOLO object detection...")
-            results = self.model(image)
-            boxes = results[0].boxes
+    def detect(
+        self, image: Image.Image, write_image: bool = False, conf: float | None = None
+    ) -> list:
+        # Failures propagate: swallowing them made a failed detection look like
+        # "no objects found" on a job that then read "completed".
+        self.logger.info("Performing YOLO object detection...")
+        results = self.model(image) if conf is None else self.model(image, conf=conf)
+        boxes = results[0].boxes
 
-            detections = [{
-                'label': results[0].names[int(cls)],
-                'confidence': float(score),
-                'bbox': box.xywh.tolist()[0],
-            } for box, cls, score in zip(boxes, boxes.cls, boxes.conf)]
+        detections = [{
+            'label': results[0].names[int(cls)],
+            'confidence': float(score),
+            'bbox': box.xywh.tolist()[0],
+        } for box, cls, score in zip(boxes, boxes.cls, boxes.conf)]
 
-            if write_image:
-                self.write_image_with_detections(
-                    image,
-                    detections,
-                    "src/consumer/processing/processed_media_dump/yolo_out.jpg",
-                )
+        if write_image:
+            self.write_image_with_detections(
+                image,
+                detections,
+                "src/consumer/processing/processed_media_dump/yolo_out.jpg",
+            )
 
-            return detections
-        except Exception:
-            self.logger.exception("Exception during YOLO detection")
-            return None
+        return detections
 
     def write_image_with_detections(self, image: Image.Image, detections: list, save_path: str):
         draw = ImageDraw.Draw(image)

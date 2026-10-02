@@ -35,7 +35,7 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
         nodes = [
             {
                 "node_id": "n0",
-                "pipeline_node_id": self.node_ids["captioning"],
+                "pipeline_node_id": self.node_ids["vision_language_model"],
                 "order": 0,
                 "config_overrides": overrides or {},
             }
@@ -82,7 +82,7 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
         from src.services.pipeline_service import _build_graph
 
         updated_nodes, updated_edges = _build_graph([
-            {"pipeline_node_id": self.node_ids["captioning"], "config_overrides": {"model": "blip-large"}}
+            {"pipeline_node_id": self.node_ids["vision_language_model"], "config_overrides": {"model": "blip-large"}}
         ])
         self.r.pipelines.update(
             pipeline["_id"], {"nodes": updated_nodes, "edges": updated_edges}
@@ -95,8 +95,8 @@ class PipelineLinkageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_rescan_redispatches_failed_job(self):
         # `redispatch_failed=True` is what a manual "Scan" API call opts into
-        # (see consume_scan_commands) — a human explicitly asking to re-check
-        # the workspace is exactly when retrying a failed job makes sense.
+        # (see workspaces.py's /scan route) — a human explicitly asking to
+        # re-check the workspace is exactly when retrying a failed job makes sense.
         pipeline = self._make_pipeline("p1")
         await self._reconciler([pipeline["_id"]]).reconcile()
         job = self.r.jobs.list_all()[0]

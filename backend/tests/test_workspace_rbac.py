@@ -93,26 +93,31 @@ class DeleteTests(RbacFixture):
 class ScanAndClearTests(RbacFixture):
     def test_viewer_cannot_scan(self):
         with self.assertRaises(WorkspaceAccessError):
-            self.svc.trigger_scan(self.wid, owner_id=self.viewer["_id"])
+            self.svc.scan_workspace(self.wid, owner_id=self.viewer["_id"])
 
     def test_editor_can_scan(self):
-        self.assertEqual(self.svc.trigger_scan(self.wid, owner_id=self.editor["_id"])["_id"], self.wid)
+        result = self.svc.scan_workspace(self.wid, owner_id=self.editor["_id"])
+        self.assertEqual(result["workspace"]["_id"], self.wid)
+        self.assertEqual(result["paths"], [])
 
     def test_scan_without_pipelines_is_a_validation_error(self):
         self.r.workspaces.update(self.wid, {"pipeline_ids": []})
         with self.assertRaises(WorkspaceValidationError):
-            self.svc.trigger_scan(self.wid, owner_id=self.owner["_id"])
+            self.svc.scan_workspace(self.wid, owner_id=self.owner["_id"])
 
     def test_stranger_scan_is_none(self):
-        self.assertIsNone(self.svc.trigger_scan(self.wid, owner_id=self.stranger["_id"]))
+        self.assertIsNone(self.svc.scan_workspace(self.wid, owner_id=self.stranger["_id"]))
 
     def test_viewer_cannot_clear_outputs(self):
         with self.assertRaises(WorkspaceAccessError):
             self.svc.clear_pipeline_outputs(self.wid, "p1", owner_id=self.viewer["_id"])
 
     def test_editor_clear_returns_counts(self):
+        # jobs are kept on clear (see workspace_service.clear_pipeline_outputs) so
+        # the reconciler doesn't rebuild what was just cleared — only outputs/runs
+        # are reported as deleted.
         counts = self.svc.clear_pipeline_outputs(self.wid, "p1", owner_id=self.editor["_id"])
-        self.assertEqual(set(counts), {"outputs_deleted", "runs_deleted", "jobs_deleted"})
+        self.assertEqual(set(counts), {"outputs_deleted", "runs_deleted"})
 
 
 class MembershipTests(RbacFixture):

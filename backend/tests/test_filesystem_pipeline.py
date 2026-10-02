@@ -183,6 +183,61 @@ class FilesystemPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.publisher.messages, [])
 
 
+class ScanWithoutJobsOrPipelinesTests(unittest.IsolatedAsyncioTestCase):
+    """scan() is the half the API's Scan route and the watcher's periodic loop
+    call directly — it must work with only assets/observations, no jobs,
+    pipelines, or publisher at all (they're optional now, see __init__)."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.r = new_repos()
+
+    async def asyncTearDown(self):
+        self.tmp.cleanup()
+
+    def _scanner(self):
+        return ReconciliationService(
+            assets=self.r.assets, observations=self.r.observations,
+            workspace_path=str(self.root), workspace_id="test-root",
+        )
+
+    def test_lists_current_files_with_no_jobs_or_pipelines_provided(self):
+        (self.root / "a.jpg").write_bytes(b"x")
+        (self.root / "b.png").write_bytes(b"y")
+
+        found = self._scanner().scan()
+
+        self.assertEqual({p.name for p in found}, {"a.jpg", "b.png"})
+
+    def test_creates_no_assets_or_jobs_by_itself(self):
+        (self.root / "a.jpg").write_bytes(b"x")
+
+        self._scanner().scan()
+
+        self.assertEqual(self.r.assets.collection.docs, [])  # observe_file does that part
+        self.assertEqual(self.r.jobs.collection.docs, [])
+
+    async def test_marks_a_deleted_files_observation_missing(self):
+        image = self.root / "gone.jpg"
+        image.write_bytes(b"x")
+        ingester = ReconciliationService(
+            assets=self.r.assets, observations=self.r.observations,
+            jobs=self.r.jobs, pipelines=self.r.pipelines, workspace_path=str(self.root),
+            workspace_id="test-root",
+        )
+        await ingester.observe_file(image)
+        image.unlink()
+
+        self._scanner().scan()
+
+        self.assertEqual(self.r.observations.collection.docs[0]["status"], "missing")
+        self.assertFalse(self.r.assets.collection.docs[0]["active"])
+
+    def test_empty_workspace_returns_no_files(self):
+        self.assertEqual(self._scanner().scan(), [])
+
+
 class ReconciliationEventTests(unittest.IsolatedAsyncioTestCase):
     """A newly-discovered image's job announces itself as 'queued' immediately —
     previously an implicit side effect of the god-repository's own

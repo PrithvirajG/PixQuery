@@ -54,7 +54,7 @@ def new_repos(*, seed_system_nodes: bool = True) -> Repos:
 
     ``seed_system_nodes`` mirrors what the real app does at startup (every
     process seeds the pipeline-node library) — on by default so tests see the
-    same system nodes (object_detection, captioning, ...) production does,
+    same system nodes (object_detection, vision_language_model, ...) production does,
     matching what the old ``InMemoryPipelineRepository`` did implicitly.
     """
     repos = repos_from_database(FakeDatabase())

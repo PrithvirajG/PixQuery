@@ -24,14 +24,7 @@ def pipeline_version_hash(
     version and reprocesses affected assets.
     """
     node_payload = sorted(
-        (
-            {
-                "node_id": node.get("node_id"),
-                "pipeline_node_id": node.get("pipeline_node_id"),
-                "config_overrides": node.get("config_overrides", {}),
-            }
-            for node in nodes
-        ),
+        (_node_version_payload(node) for node in nodes),
         key=lambda n: (n["node_id"] or "", n["pipeline_node_id"] or ""),
     )
     edge_payload = sorted(
@@ -52,3 +45,18 @@ def pipeline_version_hash(
         ).encode("utf-8")
     ).hexdigest()
     return f"p-{digest[:12]}"
+
+
+def _node_version_payload(node: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "node_id": node.get("node_id"),
+        "pipeline_node_id": node.get("pipeline_node_id"),
+        "config_overrides": node.get("config_overrides", {}),
+    }
+    # Only when set: a node on its executor's default model hashes exactly as it
+    # did before the `model` field existed, so adding the field didn't bump every
+    # stored pipeline's version (and reprocess every asset). Choosing a model —
+    # a real change in output — does bump it.
+    if node.get("model"):
+        payload["model"] = node["model"]
+    return payload

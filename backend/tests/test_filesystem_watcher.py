@@ -1,9 +1,13 @@
 """ImageEventHandler event filtering and WorkspaceWatcher's observer lifecycle.
 
 watchdog's Observer is replaced with a recorder, and each workspace's
-ReconciliationService with a fake, so no threads start and no files are hashed.
+ReconciliationService with a fake, so no threads start and no files are
+hashed. Both classes now only ever *publish* a raw observation — neither
+hashes a file nor touches jobs/pipelines directly anymore (see
+filesystem_watcher.py's module docstring for why).
 """
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,30 +15,32 @@ from types import SimpleNamespace
 from unittest import mock
 
 from src.consumer.ingestion import filesystem_watcher as fw
-from src.errors.files import FileNotStableError
 from src.logging_config import get_request_id
 from tests.repo_factory import new_repos
 
 
+class FakePublisher:
+    def __init__(self):
+        self.messages = []
+        self.request_ids = []
+
+    async def publish(self, message):
+        self.messages.append(json.loads(message))
+        self.request_ids.append(get_request_id())
+
+
 class FakeReconciler:
-    def __init__(self, extensions=(".jpg",), error=None, queued=("j1", "j2"), pipelines_to_run=("p1",)):
+    def __init__(self, extensions=(".jpg",), error=None, found=("/w/a.jpg", "/w/b.jpg")):
         self.extensions = set(extensions)
         self.error = error
-        self.queued = list(queued)
-        self.pipelines_to_run = list(pipelines_to_run)
-        self.observed = []
-        self.reconciles = []
+        self.found = [Path(p) for p in found]
+        self.scans = 0
 
-    async def observe_file(self, path):
-        self.observed.append((path, get_request_id()))
+    def scan(self):
+        self.scans += 1
         if self.error:
             raise self.error
-
-    async def reconcile(self, *, redispatch_failed=False):
-        self.reconciles.append(redispatch_failed)
-        if self.error:
-            raise self.error
-        return self.queued
+        return self.found
 
 
 def fs_event(path, *, is_directory=False, dest_path=None):
@@ -43,10 +49,12 @@ def fs_event(path, *, is_directory=False, dest_path=None):
 
 class ImageEventHandlerTests(unittest.TestCase):
     def setUp(self):
-        self.reconciler = FakeReconciler()
-        self.handler = fw.ImageEventHandler(self.reconciler, loop=None)
+        self.publisher = FakePublisher()
+        self.handler = fw.ImageEventHandler("ws1", {".jpg"}, self.publisher, loop=None)
         self.scheduled = []
-        patcher = mock.patch.object(fw.asyncio, "run_coroutine_threadsafe", lambda coro, loop: self.scheduled.append(coro))
+        patcher = mock.patch.object(
+            fw.asyncio, "run_coroutine_threadsafe", lambda coro, loop: self.scheduled.append(coro)
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(lambda: [c.close() for c in self.scheduled])
@@ -56,12 +64,14 @@ class ImageEventHandlerTests(unittest.TestCase):
             asyncio.run(coro)
         self.scheduled.clear()
 
-    def test_created_image_is_observed_with_a_fresh_request_id(self):
+    def test_created_image_is_published_with_a_fresh_request_id(self):
         self.handler.on_created(fs_event("/w/a.jpg"))
         self._run_scheduled()
-        (path, rid), = self.reconciler.observed
-        self.assertEqual(path, Path("/w/a.jpg"))
-        self.assertRegex(rid, r"^[0-9a-f]{12}$")
+        (msg,) = self.publisher.messages
+        self.assertEqual(msg["workspace_id"], "ws1")
+        self.assertEqual(msg["path"], str(Path("/w/a.jpg")))
+        self.assertFalse(msg["redispatch_failed"])
+        self.assertRegex(self.publisher.request_ids[0], r"^[0-9a-f]{12}$")
 
     def test_extension_match_is_case_insensitive(self):
         self.handler.on_modified(fs_event("/w/B.JPG"))
@@ -72,17 +82,18 @@ class ImageEventHandlerTests(unittest.TestCase):
         self.handler.on_created(fs_event("/w/folder.jpg", is_directory=True))
         self.assertEqual(self.scheduled, [])
 
-    def test_move_observes_the_destination(self):
+    def test_move_publishes_the_destination(self):
         self.handler.on_moved(fs_event("/w/tmp.part", dest_path="/w/final.jpg"))
         self._run_scheduled()
-        self.assertEqual(self.reconciler.observed[0][0], Path("/w/final.jpg"))
+        self.assertEqual(self.publisher.messages[0]["path"], str(Path("/w/final.jpg")))
 
-    def test_unstable_and_failing_files_do_not_raise(self):
-        for error in (FileNotStableError("still copying"), RuntimeError("boom")):
-            with self.subTest(error=type(error).__name__):
-                self.reconciler.error = error
-                self.handler.on_created(fs_event("/w/a.jpg"))
-                self._run_scheduled()  # must not raise
+    def test_publish_failure_does_not_raise(self):
+        async def boom(message):
+            raise RuntimeError("amqp down")
+
+        self.publisher.publish = boom
+        self.handler.on_created(fs_event("/w/a.jpg"))
+        self._run_scheduled()  # must not raise
 
 
 class FakeObserver:
@@ -114,10 +125,11 @@ class WorkspaceWatcherTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.r = new_repos()
+        self.publisher = FakePublisher()
         self.reconcilers = {}
         self.watcher = fw.WorkspaceWatcher(
             workspaces=self.r.workspaces, assets=self.r.assets, observations=self.r.observations,
-            jobs=self.r.jobs, pipelines=self.r.pipelines, publisher=None, loop=None,
+            publisher=self.publisher, loop=None,
         )
         self.watcher._make_reconciler = lambda ws: self.reconcilers.setdefault(ws["_id"], FakeReconciler())
 
@@ -132,7 +144,9 @@ class WorkspaceWatcherTests(unittest.TestCase):
         asyncio.run(self.watcher.sync())
         self.assertEqual(list(self.watcher._watchers), [a["_id"]])
         self.assertTrue(FakeObserver.instances[0].started)
-        self.assertEqual(self.reconcilers[a["_id"]].reconciles, [False])
+        self.assertEqual(self.reconcilers[a["_id"]].scans, 1)
+        self.assertEqual(len(self.publisher.messages), 2)
+        self.assertFalse(any(m["redispatch_failed"] for m in self.publisher.messages))
         self.assertTrue((Path(self.tmp.name) / "a").is_dir())  # root created
 
     def test_sync_stops_deactivated_workspaces(self):
@@ -152,11 +166,12 @@ class WorkspaceWatcherTests(unittest.TestCase):
         self.assertEqual(len(FakeObserver.instances), 2)
         self.assertTrue(FakeObserver.instances[0].stopped)
 
-    def test_manual_reconcile_redispatches_and_returns_the_count(self):
+    def test_manual_reconcile_publishes_and_returns_the_count(self):
         a = self._ws("a")
         asyncio.run(self.watcher.sync())
+        self.publisher.messages.clear()
         self.assertEqual(asyncio.run(self.watcher.reconcile_workspace(a["_id"], redispatch_failed=True)), 2)
-        self.assertEqual(self.reconcilers[a["_id"]].reconciles[-1], True)
+        self.assertTrue(all(m["redispatch_failed"] for m in self.publisher.messages))
 
     def test_reconcile_unknown_workspace_is_zero(self):
         self.assertEqual(asyncio.run(self.watcher.reconcile_workspace("nope")), 0)
@@ -170,9 +185,11 @@ class WorkspaceWatcherTests(unittest.TestCase):
     def test_reconcile_all_and_stop_all(self):
         a, b = self._ws("a"), self._ws("b")
         asyncio.run(self.watcher.sync())
+        self.publisher.messages.clear()
         asyncio.run(self.watcher.reconcile_all())
-        self.assertEqual(self.reconcilers[a["_id"]].reconciles, [False, False])
-        self.assertEqual(self.reconcilers[b["_id"]].reconciles, [False, False])
+        self.assertEqual(self.reconcilers[a["_id"]].scans, 2)
+        self.assertEqual(self.reconcilers[b["_id"]].scans, 2)
+        self.assertEqual(len(self.publisher.messages), 4)
         self.watcher.stop_all()
         self.assertEqual(self.watcher._watchers, {})
 

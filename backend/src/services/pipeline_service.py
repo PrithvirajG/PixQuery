@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from src.domain_events import outputs_cleared_event
 from src.errors.graph import GraphCycleError, UnknownNodeError
-from src.errors.pipelines import PipelineValidationError
+from src.errors.pipelines import PipelineNodeCreationDisabledError, PipelineValidationError
 from src.infrastructure.messaging import EventSink
 from src.logging_config import get_logger
 from src.repositories.model_outputs_repository import ModelOutputsRepository
@@ -15,6 +15,7 @@ from src.repositories.pipeline_runs_repository import PipelineRunsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
+from src.services.executors.registry import describe_node_type, supported_model_ids
 from src.utils.graph import topological_order
 
 logger = get_logger(__name__)
@@ -43,24 +44,22 @@ class PipelineService:
     # ── Pipeline Node Library ─────────────────────────────────────
 
     def list_pipeline_nodes(self, *, owner_id: str) -> list[dict[str, Any]]:
-        return serialize_documents(self.nodes.list_all(owner_id=owner_id))
+        return [
+            _with_executor_info(node)
+            for node in serialize_documents(self.nodes.list_all(owner_id=owner_id))
+        ]
 
     def get_pipeline_node(self, node_id: str) -> dict[str, Any] | None:
         node = self.nodes.get(node_id)
-        return serialize_document(node) if node else None
+        return _with_executor_info(serialize_document(node)) if node else None
 
     def create_pipeline_node(self, *, owner_id: str, data: dict[str, Any]) -> dict[str, Any]:
-        node = self.nodes.create(
-            name=data["name"],
-            description=data.get("description", ""),
-            node_type=data["node_type"],
-            context_inputs=data.get("context_inputs", []),
-            context_outputs=data.get("context_outputs", []),
-            config_schema=data.get("config_schema", {}),
-            default_config=data.get("default_config", {}),
-            owner_id=owner_id,
+        # Adding a brand-new node type to the shared library is disabled for
+        # every user for now (product decision, 2026-09-03) — configuring an
+        # existing node's settings on a specific pipeline is unaffected.
+        raise PipelineNodeCreationDisabledError(
+            "Creating new pipeline node types is currently disabled."
         )
-        return serialize_document(node)
 
     def update_pipeline_node(
         self, node_id: str, *, owner_id: str, data: dict[str, Any]
@@ -98,6 +97,7 @@ class PipelineService:
 
     def create_pipeline(self, *, owner_id: str, data: dict[str, Any]) -> dict[str, Any]:
         nodes, edges = _build_graph(data.get("nodes", []), data.get("edges"))
+        self._validate_models(nodes)
         pipeline = self.pipelines.create(
             owner_id=owner_id,
             name=data["name"],
@@ -122,6 +122,7 @@ class PipelineService:
             updates["nodes"], updates["edges"] = _build_graph(
                 data["nodes"], data.get("edges")
             )
+            self._validate_models(updates["nodes"])
         updated = self.pipelines.update(pipeline_id, updates)
         return serialize_document(updated) if updated else None
 
@@ -172,6 +173,39 @@ class PipelineService:
                 )
         return deleted
 
+    def _validate_models(self, nodes: list[dict[str, Any]]) -> None:
+        """Reject a node whose chosen ``model`` its executor can't run.
+
+        Checked at save time so a typo or a stale client fails the request with a
+        clear 400 instead of failing every job the pipeline later dispatches.
+        A node with no ``model`` runs its executor's default and always passes.
+        """
+        for node in nodes:
+            model = node.get("model")
+            if not model:
+                continue
+            library_node = self.nodes.get(node["pipeline_node_id"])
+            node_type = library_node.get("node_type") if library_node else None
+            supported = supported_model_ids(node_type) if node_type else set()
+            if model not in supported:
+                raise PipelineValidationError(
+                    f"Model '{model}' is not available for node type '{node_type}'."
+                )
+
+
+def _with_executor_info(node: dict[str, Any]) -> dict[str, Any]:
+    """Merge the executor's editor-facing description into a node-library entry.
+
+    Kind, executor name, output label and the model list are owned by the
+    executor code, not stored in Mongo — so a new model shows up in the editor as
+    soon as its executor supports it, with no reseed or migration.
+    """
+    info = describe_node_type(node.get("node_type", "")) or {
+        "kind": "transform", "executor": None, "outputs_label": "",
+        "models": [], "default_model": None,
+    }
+    return {**node, **info}
+
 
 def _build_graph(
     raw_nodes: list[dict[str, Any]],
@@ -191,6 +225,7 @@ def _build_graph(
                 "node_id": raw.get("node_id") or str(uuid4()),
                 "pipeline_node_id": raw["pipeline_node_id"],
                 "config_overrides": raw.get("config_overrides", {}),
+                "model": raw.get("model") or None,
                 "position": raw.get("position") or {"x": 0, "y": i * 120},
             }
         )

@@ -18,6 +18,7 @@ from src.repositories.pipeline_definitions_repository import PipelineDefinitions
 from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
 from src.repositories.pipeline_runs_repository import PipelineRunsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.utils.files import sha256_file
 from src.utils.graph import topological_order
 from src.utils.time import utcnow
@@ -34,26 +35,26 @@ logger = get_logger(__name__)
 DEFAULT_PIPELINE_NODES: list[dict[str, Any]] = [
     {
         "node_type": "object_detection",
-        "config": {"model": "yolov8n", "threshold": 0.5},
+        "config": {},
         "context_inputs": ["image"],
         "context_outputs": ["detections"],
     },
     {
-        "node_type": "captioning",
-        "config": {"model": "blip-base"},
+        "node_type": "vision_language_model",
+        "config": {},
         "context_inputs": ["image"],
         "context_outputs": ["caption"],
     },
     {
         "node_type": "embedding",
-        "config": {"model": "openai/clip-vit-base-patch32"},
+        "config": {},
         "context_inputs": ["image"],
         "context_outputs": ["embeddings"],
     },
 ]
 
 # Context keys that are working state, not persisted as model_outputs.
-_PERSIST_SKIP_KEYS = {"image", "asset", "embeddings", "text_embedding"}
+_PERSIST_SKIP_KEYS = {"image", "asset", "embeddings", "text_embedding", "embedding_model"}
 
 
 @dataclass
@@ -84,13 +85,20 @@ def _resolve_pipeline_graph(
 ) -> tuple[dict[str, ResolvedNode], list[dict[str, Any]]]:
     """Resolve a stored pipeline definition into (nodes_by_id, edges).
 
-    Falls back to ``DEFAULT_PIPELINE_NODES`` (as a straight chain) when the pipeline
-    id has no stored definition. A definition with nodes but no stored ``edges`` —
-    e.g. one written directly in a test — is chained in node order, so a linear
-    pipeline stays linear.
+    Falls back to ``DEFAULT_PIPELINE_NODES`` (as a straight chain) only when the
+    pipeline id has no stored definition at all (the legacy default id). A stored
+    pipeline with no stages is a permanent failure, NOT a reason to run the
+    default chain — it would run models the pipeline never contained. A
+    definition with nodes but no stored ``edges`` — e.g. one written directly in a
+    test — is chained in node order, so a linear pipeline stays linear.
     """
     definition = pipelines.get(pipeline_id) if pipeline_id else None
-    if not definition or not definition.get("nodes"):
+    if definition is not None and not definition.get("nodes"):
+        raise PermanentNodeError(
+            f"Pipeline '{definition.get('name') or pipeline_id}' has no stages — "
+            "add at least one stage before processing"
+        )
+    if not definition:
         nodes_by_id: dict[str, ResolvedNode] = {}
         for i, n in enumerate(DEFAULT_PIPELINE_NODES):
             nid = f"d{i}"
@@ -111,12 +119,19 @@ def _resolve_pipeline_graph(
                 f"Pipeline node {node['pipeline_node_id']} not found in node library"
             )
         nid = node.get("node_id") or node["pipeline_node_id"]
+        config = {
+            **library_node.get("default_config", {}),
+            **node.get("config_overrides", {}),
+        }
+        # The model comes only from the node's own `model` field. A "model" key
+        # left in older defaults/overrides never selected anything (executors
+        # ignored it), so it's dropped rather than suddenly honored.
+        config.pop("model", None)
+        if node.get("model"):
+            config["model"] = node["model"]
         nodes_by_id[nid] = ResolvedNode(
             node_type=library_node["node_type"],
-            config={
-                **library_node.get("default_config", {}),
-                **node.get("config_overrides", {}),
-            },
+            config=config,
             context_inputs=list(library_node.get("context_inputs", [])),
             context_outputs=list(library_node.get("context_outputs", [])),
             node_id=nid,
@@ -170,6 +185,7 @@ class PipelineExecutionService:
         assets: ImageAssetsRepository,
         pipelines: PipelineDefinitionsRepository,
         nodes: PipelineNodesRepository,
+        workspaces: WorkspaceDefinitionsRepository | None = None,
         embedding_store=None,
         event_sink: EventSink | None = None,
         get_executor: Callable[[str], Any] | None = None,
@@ -181,6 +197,7 @@ class PipelineExecutionService:
         self.assets = assets
         self.pipelines = pipelines
         self.nodes = nodes
+        self.workspaces = workspaces
         self.embedding_store = embedding_store
         self.event_sink = event_sink
         self._get_executor = get_executor or _default_get_executor
@@ -309,6 +326,7 @@ class PipelineExecutionService:
         """
         nodes_by_id, edges = _resolve_pipeline_graph(self.pipelines, self.nodes, job["pipeline_id"])
         order = _topological_order(nodes_by_id, edges)
+        workspace_root = self._resolve_workspace_root(job)
 
         incoming: dict[str, list[dict[str, Any]]] = {nid: [] for nid in nodes_by_id}
         for edge in edges:
@@ -317,7 +335,7 @@ class PipelineExecutionService:
         outputs: dict[str, dict[str, Any]] = {}  # node_id → its accumulated context
         for topo_index, nid in enumerate(order):
             node = nodes_by_id[nid]
-            context: dict[str, Any] = {"asset": asset}
+            context: dict[str, Any] = {"asset": asset, "workspace_root": workspace_root}
             in_edges = incoming[nid]
             if not in_edges:
                 context["image"] = image  # source nodes get the original image
@@ -329,7 +347,7 @@ class PipelineExecutionService:
                     context[dst] = parent.get(src)
                 else:
                     for key, value in parent.items():
-                        if key != "asset":
+                        if key not in ("asset", "workspace_root"):
                             context[key] = value
 
             missing = [key for key in node.context_inputs if key not in context]
@@ -348,7 +366,7 @@ class PipelineExecutionService:
             self._persist_outputs(job, asset, pipeline_run_id, node, executor, updates)
             outputs[nid] = {**context, **updates}
             # Announce progress *within* the run, so a watching UI can show
-            # "stage 3 of 5 · captioning" instead of one opaque "processing" span.
+            # "stage 3 of 5 · vision_language_model" instead of one opaque "processing" span.
             if self.event_sink is not None:
                 self.event_sink.emit(
                     pipeline_stage_event(
@@ -367,9 +385,28 @@ class PipelineExecutionService:
         final_context: dict[str, Any] = {"asset": asset, "image": image}
         for nid in order:
             for key, value in outputs[nid].items():
-                if key != "asset":
+                if key not in ("asset", "workspace_root"):
                     final_context[key] = value
         return final_context
+
+    def _resolve_workspace_root(self, job: dict[str, Any]) -> str | None:
+        """Look up the owning workspace's root path for this job, if any.
+
+        Nodes that write to disk (``image_write``) anchor there instead of the
+        source file's own folder, so outputs always land under a single
+        ``<workspace_root>/pixquery_output/`` regardless of how deep the source
+        asset sits — writing relative to the source's parent is what let a
+        previous run's output become the next run's input and nest forever.
+        """
+        if not self.workspaces:
+            return None
+        workspace_id = job.get("workspace_id")
+        if not workspace_id:
+            return None
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        return workspace.get("workspace_path") or workspace.get("watch_root")
 
     def _maybe_extract_metadata(self, asset) -> None:
         """Extract EXIF/GPS/dimension metadata and persist it onto the asset itself.
@@ -389,6 +426,11 @@ class PipelineExecutionService:
         self.assets.update_metadata(asset["_id"], metadata)
 
     def _persist_outputs(self, job, asset, pipeline_run_id, node, executor, updates):
+        if hasattr(executor, "provenance"):
+            model_name, model_version = executor.provenance(node.config)
+        else:
+            model_name = getattr(executor, "model_name", "")
+            model_version = getattr(executor, "model_version", "")
         for key, value in updates.items():
             if key in _PERSIST_SKIP_KEYS:
                 continue
@@ -396,8 +438,8 @@ class PipelineExecutionService:
             self.outputs.add(
                 asset_id=asset["_id"],
                 pipeline_run_id=pipeline_run_id,
-                model_name=getattr(executor, "model_name", "") or node.node_type,
-                model_version=getattr(executor, "model_version", "") or "v1",
+                model_name=model_name or node.node_type,
+                model_version=model_version or "v1",
                 output_type=output_type,
                 payload=payload,
                 node_id=node.node_id,
@@ -414,6 +456,14 @@ class PipelineExecutionService:
         image_embedding = normalize(context.get("embeddings"))
         if image_embedding is None:
             return
+        # Which model produced these vectors — set by EmbeddingExecutor.run(),
+        # carried through the merged context. Falls back to "clip" (the historical
+        # sole model) for a context that never ran an embedding node with the
+        # updated executor, which cannot happen post-deploy but keeps this method
+        # meaningful standalone (e.g. a test constructing context by hand).
+        # Routes the write to that model's own Weaviate class — see
+        # image_class_name/text_class_name for why models can't share a class.
+        model_id = context.get("embedding_model") or "clip"
         base_props = {
             "asset_id": asset["_id"],
             "content_sha256": asset["content_sha256"],
@@ -423,13 +473,14 @@ class PipelineExecutionService:
             "active": bool(asset.get("active", True)),
         }
         self.embedding_store.upsert_image_embedding(
-            vector=image_embedding, properties=base_props
+            vector=image_embedding, properties=base_props, model_id=model_id
         )
         text_embedding = normalize(context.get("text_embedding"))
         if text_embedding is not None:
             self.embedding_store.upsert_text_embedding(
                 vector=text_embedding,
                 properties={**base_props, "text": context.get("caption") or ""},
+                model_id=model_id,
             )
 
 

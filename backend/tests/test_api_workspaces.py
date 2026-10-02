@@ -1,4 +1,5 @@
 """/workspaces routes: status-code mapping of the RBAC rules, scan publishing, browse."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,10 +71,22 @@ class CrudStatusTests(WorkspaceRouteFixture):
 
 
 class ScanRouteTests(WorkspaceRouteFixture):
-    def test_editor_scan_publishes_the_workspace_id(self):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        (Path(self.tmp.name) / "a.jpg").write_bytes(b"x")
+        (Path(self.tmp.name) / "b.jpg").write_bytes(b"y")
+        self.r.workspaces.update(self.wid, {"workspace_path": self.tmp.name})
+
+    def test_editor_scan_publishes_one_message_per_file(self):
         res = self.client.post(f"/workspaces/{self.wid}/scan", headers=self.as_(self.editor))
         self.assertEqual((res.status_code, res.json()["message"]), (200, "Scan triggered"))
-        self.assertEqual(FakePublisher.published, [self.wid])
+        self.assertEqual(res.json()["files_found"], 2)
+        self.assertEqual(len(FakePublisher.published), 2)
+        payloads = [json.loads(m) for m in FakePublisher.published]
+        self.assertEqual({p["workspace_id"] for p in payloads}, {self.wid})
+        self.assertTrue(all(p["redispatch_failed"] for p in payloads))
 
     def test_viewer_scan_is_403_and_publishes_nothing(self):
         res = self.client.post(f"/workspaces/{self.wid}/scan", headers=self.as_(self.viewer))
@@ -86,10 +99,12 @@ class ScanRouteTests(WorkspaceRouteFixture):
         self.assertEqual(res.status_code, 400)
 
     def test_broker_down_still_returns_200(self):
-        # Publishing is best-effort; the file-watcher's refresh loop catches up.
+        # Publishing is best-effort; a failed file waits for the next manual Scan
+        # or (if the watcher is running) its periodic pass.
         FakePublisher.fail_connect = True
         res = self.client.post(f"/workspaces/{self.wid}/scan", headers=self.as_(self.owner))
         self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["files_found"], 0)
 
 
 class MemberRouteTests(WorkspaceRouteFixture):

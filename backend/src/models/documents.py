@@ -152,7 +152,8 @@ class PipelineDefinition(BaseDocument):
     """A named DAG of pipeline-node references.
 
     ``nodes`` are the vertices — each ``{node_id, pipeline_node_id, config_overrides,
-    position}`` — and ``edges`` are the wiring ``{edge_id, from_node_id, to_node_id,
+    model, position}``, where ``model`` is the chosen model id (``None`` = the
+    executor's default) — and ``edges`` are the wiring ``{edge_id, from_node_id, to_node_id,
     from_output?, to_input?}``. Both are built by ``PipelineService._build_graph``.
     A straight chain is just a DAG whose edges form one line; the executor
     topologically sorts and runs it.

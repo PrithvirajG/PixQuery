@@ -14,6 +14,7 @@ from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.users_repository import UsersRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.document_serializer import serialize_document, serialize_documents
+from src.services.reconciliation_service import ReconciliationService
 
 
 logger = get_logger(__name__)
@@ -139,8 +140,19 @@ class WorkspaceService:
         )
         return deleted
 
-    def trigger_scan(self, workspace_id: str, *, owner_id: str) -> dict[str, Any] | None:
-        """Return workspace info; actual reconciliation is handled by the watcher process."""
+    def scan_workspace(self, workspace_id: str, *, owner_id: str) -> dict[str, Any] | None:
+        """List the workspace's current files and mark missing/deleted observations.
+
+        Does the listing itself (``ReconciliationService.scan()`` — no hashing,
+        no job creation) right here in the API process; the caller (the
+        ``/scan`` route) publishes one ``file_observations`` message per
+        returned path for the pipeline-worker to actually ingest. This no
+        longer depends on the file-watcher process at all — Scan works
+        whenever the API and pipeline-worker are running.
+
+        Returns ``{"workspace": <serialized dict>, "paths": [Path, ...]}``, or
+        ``None`` if the workspace doesn't exist / isn't visible to this user.
+        """
         workspace = self.workspaces.get(workspace_id)
         if not workspace or not _can_view(role_for(workspace, owner_id)):
             return None
@@ -150,16 +162,28 @@ class WorkspaceService:
             raise WorkspaceValidationError(
                 "This workspace has no pipelines attached — attach at least one pipeline before syncing"
             )
-        return self._serialize(workspace, owner_id)
+        reconciler = ReconciliationService(
+            assets=self.assets,
+            observations=self.observations,
+            workspace_path=workspace.get("workspace_path") or workspace.get("watch_root"),
+            workspace_id=workspace_id,
+            extensions=set(workspace.get("extensions") or [".jpg", ".jpeg", ".png", ".webp"]),
+        )
+        paths = reconciler.scan()
+        return {"workspace": self._serialize(workspace, owner_id), "paths": paths}
 
     def clear_pipeline_outputs(
         self, workspace_id: str, pipeline_id: str, *, owner_id: str
     ) -> dict[str, int] | None:
         """Delete every output one pipeline has produced in this workspace so far.
 
-        Resets its jobs to 'queued' without dispatching them — a rescan only
-        redispatches 'failed' jobs, so getting outputs back requires a manual
-        per-image retrigger, not an accidental rescan.
+        The pipeline's *jobs are kept*: a job row is what tells the reconciler an
+        (image, pipeline, version) was already handled. Deleting them made the next
+        reconcile — the file-watcher's periodic pass, or a file event — create and
+        dispatch fresh jobs and regenerate everything just cleared. With the jobs
+        left in place, the pair reads as NOT_STARTED (a completed job with no
+        outputs) and stays that way until someone reprocesses it or the pipeline is
+        edited, which yields a new version and so a new job.
         """
         workspace = self.workspaces.get(workspace_id)
         if not workspace or not _can_view(role_for(workspace, owner_id)):
@@ -169,14 +193,13 @@ class WorkspaceService:
                 "Clearing pipeline outputs requires the editor or owner role"
             )
 
-        job_ids, jobs_deleted = self.jobs.delete_for_workspace_pipeline(workspace_id, pipeline_id)
+        job_ids = self.jobs.ids_for_workspace_pipeline(workspace_id, pipeline_id)
         outputs_deleted = self.outputs.delete_for_workspace_pipeline(workspace_id, pipeline_id)
         runs_deleted = self.runs.delete_for_jobs(job_ids)
 
         counts = {
             "outputs_deleted": outputs_deleted,
             "runs_deleted": runs_deleted,
-            "jobs_deleted": jobs_deleted,
         }
         logger.info(
             "Pipeline outputs cleared workspace_id=%s pipeline_id=%s %s",
@@ -197,7 +220,8 @@ class WorkspaceService:
 
         Same authorization as the workspace-wide clear — it is the same
         destructive act, just scoped to one image — resolved through the
-        workspace the asset belongs to.
+        workspace the asset belongs to. As with the workspace-wide clear, the
+        pair's job is kept so the reconciler doesn't rebuild what was cleared.
         """
         asset = self.assets.get(asset_id)
         if not asset or not asset.get("active"):
@@ -214,7 +238,7 @@ class WorkspaceService:
                 "Clearing pipeline outputs requires the editor or owner role"
             )
 
-        job_ids, jobs_deleted = self.jobs.delete_for_asset_pipeline(asset_id, pipeline_id)
+        job_ids = self.jobs.ids_for_asset_pipeline(asset_id, pipeline_id)
 
         # Resolve the runs both ways: outputs written before pipeline_id was
         # denormalized onto them carry no pipeline_id on the run either, so their
@@ -230,7 +254,6 @@ class WorkspaceService:
         counts = {
             "outputs_deleted": outputs_deleted,
             "runs_deleted": runs_deleted,
-            "jobs_deleted": jobs_deleted,
         }
         logger.info(
             "Pipeline outputs cleared asset_id=%s pipeline_id=%s %s",

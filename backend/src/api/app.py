@@ -112,8 +112,8 @@ def create_app() -> FastAPI:
     # bound before anything else touches it, including CORS handling and the
     # error envelope. The same id rides any RabbitMQ message this request
     # publishes (see RabbitPublisher.publish's default correlation_id), so a
-    # workspace scan is traceable end-to-end: this log line, the scan_commands
-    # consumer's, and the pipeline-worker's all share it.
+    # workspace scan is traceable end-to-end: this log line, the
+    # FileObservationConsumer's, and the image_task job it dispatches all share it.
     @app.middleware("http")
     async def add_request_id(request: Request, call_next):
         request_id, token = bind_request_id(request.headers.get("X-Request-ID"))

@@ -7,7 +7,7 @@
 // same lifecycle at the workspace level).
 import React, { useState } from 'react';
 import { AP, STATUS } from './tokens';
-import { IconBtn, EyeBtn } from './kit';
+import { IconBtn, EyeBtn, Eyebrow } from './kit';
 
 /* ── inline icons for pipeline controls ───────────────────────── */
 // Small stroke icons for the reprocess/delete cluster and the collapse
@@ -132,6 +132,26 @@ export function objColor(task, name, alpha) {
   return alpha == null ? `oklch(0.74 0.14 ${hue})` : `oklch(0.74 0.14 ${hue} / ${alpha})`;
 }
 
+/* ── readable text colour over an arbitrary swatch ────────────── */
+
+// Black or white, whichever stays legible on `hex` — picked from the swatch's
+// own relative luminance (WCAG's channel curve). A palette is arbitrary user
+// data, so neither a fixed colour nor a `mix-blend-mode` survives every input:
+// difference-blending white went muddy and unreadable on mid-tone oranges.
+// Falls back to near-white for anything that isn't a 6-digit hex.
+export function readableOn(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(String(hex ?? ''));
+  if (!match) return 'rgba(255,255,255,.92)';
+  const int = parseInt(match[1], 16);
+  const [r, g, b] = [(int >> 16) & 255, (int >> 8) & 255, int & 255].map((channel) => {
+    const s = channel / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.42
+    ? 'rgba(0,0,0,.78)'
+    : 'rgba(255,255,255,.92)';
+}
+
 /* ── detected/labeled object row ──────────────────────────────── */
 
 // One detected object or classification label: name, an optional repeat count,
@@ -209,6 +229,17 @@ const OUTPUT_LABEL = {
   labels: 'Classification',
   ocr: 'OCR text',
   written_image: 'Written image',
+  image_stats: 'Image quality',
+  aesthetic_score: 'Aesthetic score',
+  nsfw_flag: 'Content flag',
+  color_palette: 'Color palette',
+  open_vocab_detections: 'Open-vocabulary detection',
+  segments: 'Segments',
+  annotations: 'Annotations',
+  species: 'Species ID',
+  scene: 'Scene',
+  geo_estimate: 'Location estimate',
+  depth: 'Depth',
 };
 
 function aggregateDetections(dets) {
@@ -227,7 +258,11 @@ function aggregateDetections(dets) {
 // labels / ocr / written_image / anything else). `detectionState` — only
 // meaningful for "detections" — wires each row's checkbox + hover to a bbox
 // overlay elsewhere on the page; omit it to render the rows read-only.
-export function OutputBody({ o, detectionState }) {
+// `writtenImage` — only meaningful for "written_image" — supplies the saved
+// file's URL plus the compare toggle (`{ src, comparing, onToggleCompare }`),
+// since the component can't know an API base of its own; omit it and the card
+// falls back to the plain path/dimensions text.
+export function OutputBody({ o, detectionState, writtenImage }) {
   const p = o.payload || {};
   if (o.output_type === 'caption') {
     return (
@@ -270,14 +305,302 @@ export function OutputBody({ o, detectionState }) {
   }
   if (o.output_type === 'written_image') {
     const wi = p.written_image || {};
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    const meta = (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
         <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink, wordBreak: 'break-all' }}>{wi.path || '—'}</span>
         {wi.width ? <span style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3 }}>{wi.width}×{wi.height} · {wi.format}</span> : null}
       </div>
     );
+    // No `src` supplied (a preview card, or a caller that can't serve the file)
+    // → the original text-only rendering. The component never builds the URL
+    // itself: it has no notion of an API base, and must render standalone.
+    if (!writtenImage?.src) {
+      return <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{meta}</div>;
+    }
+    const comparing = !!writtenImage.comparing;
+    const toggle = writtenImage.onToggleCompare;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={!toggle}
+            title={toggle ? (comparing ? 'Stop comparing' : 'Compare with the original') : undefined}
+            style={{
+              width: 44, height: 44, borderRadius: 8, overflow: 'hidden', padding: 0,
+              flex: '0 0 auto', background: AP.cardHi,
+              border: `1px solid ${comparing ? AP.lumenLine : AP.line2}`,
+              boxShadow: comparing ? `0 0 0 2px ${AP.lumenBg}` : 'none',
+              cursor: toggle ? 'pointer' : 'default',
+            }}
+          >
+            <img src={writtenImage.src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+          </button>
+          {meta}
+        </div>
+        {toggle && (
+          <span style={{ fontFamily: AP.sans, fontSize: 11, color: comparing ? AP.lumenSoft : AP.ink3 }}>
+            {comparing ? 'Comparing with the original — drag the divider' : 'Click the thumbnail to compare with the original'}
+          </span>
+        )}
+      </div>
+    );
+  }
+  if (o.output_type === 'image_stats') {
+    const fields = [
+      ['Sharp', p.sharpness], ['Exposure', p.exposure], ['Contrast', p.contrast],
+      ['Bright', p.brightness], ['Color', p.colorfulness],
+    ].filter(([, v]) => v != null);
+    return fields.length ? (
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${fields.length}, minmax(0,1fr))`, gap: 14 }}>
+        {fields.map(([label, v]) => (
+          <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <Eyebrow>{label}</Eyebrow>
+            <span style={{ fontFamily: AP.sans, fontSize: 19, fontWeight: 600, color: AP.ink }}>{Math.round(v)}</span>
+          </div>
+        ))}
+      </div>
+    ) : <Muted>No quality metrics recorded.</Muted>;
+  }
+  if (o.output_type === 'aesthetic_score') {
+    const score = p.score ?? 0;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <span style={{ fontFamily: AP.sans, fontSize: 19, fontWeight: 600, color: AP.ink }}>
+            {score.toFixed(1)} <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3, fontWeight: 400 }}>/ 10</span>
+          </span>
+          <span style={{ width: 130, height: 5, borderRadius: 99, background: 'rgba(255,255,255,0.09)', overflow: 'hidden', flex: '0 0 auto' }}>
+            <span style={{ display: 'block', height: '100%', width: `${Math.round((score / 10) * 100)}%`, borderRadius: 99, background: AP.lumenGrad }} />
+          </span>
+        </div>
+        <Muted>Taste-based, not an objective quality score — trained on human preference ratings, biased toward saturated/high-contrast images.</Muted>
+      </div>
+    );
+  }
+  if (o.output_type === 'nsfw_flag') {
+    const flagged = !!p.flagged;
+    const tone = flagged ? STATUS.err : STATUS.ok;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: tone.bg, border: `1px solid ${tone.line}`, borderRadius: 999, padding: '3px 10px 3px 8px' }}>
+            <span style={{ width: 6, height: 6, borderRadius: 99, background: tone.c, boxShadow: flagged ? `0 0 8px ${tone.c}` : 'none' }} />
+            <span style={{ fontFamily: AP.sans, fontSize: 12, fontWeight: 500, color: tone.c }}>{flagged ? 'Flagged for review' : (p.label || 'Clear')}</span>
+          </span>
+          {p.score != null && <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink2 }}>{p.score.toFixed(2)} confidence</span>}
+        </div>
+        <Muted>Binary flag only — treat as a review prompt, never an automatic action.</Muted>
+      </div>
+    );
+  }
+  if (o.output_type === 'color_palette') {
+    const colors = p.colors || [];
+    return colors.length ? (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {colors.map((c, i) => (
+            <span key={i} style={{ flex: 1, height: 44, borderRadius: 9, background: c.hex, border: `1px solid ${AP.line2}`, position: 'relative' }}>
+              <span style={{ position: 'absolute', left: 6, bottom: 5, fontFamily: AP.mono, fontSize: 9, color: readableOn(c.hex) }}>{c.hex}</span>
+            </span>
+          ))}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          {p.dominant && <span style={{ fontFamily: AP.sans, fontSize: 11.5, color: AP.ink2 }}>Dominant · <b style={{ color: AP.ink, fontWeight: 600 }}>{p.dominant}</b></span>}
+          {p.temperature != null && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+              <Eyebrow>Cool</Eyebrow>
+              <span style={{ width: 60, height: 4, borderRadius: 99, background: 'linear-gradient(90deg,#6f8fd9,#e8c07d,#c4633f)', position: 'relative' }}>
+                <span style={{ position: 'absolute', top: -2, left: `${Math.round(((p.temperature + 1) / 2) * 100)}%`, width: 8, height: 8, borderRadius: 99, background: '#fff', boxShadow: `0 0 0 2px ${AP.card}` }} />
+              </span>
+              <Eyebrow>Warm</Eyebrow>
+            </span>
+          )}
+        </div>
+      </div>
+    ) : <Muted>No palette extracted.</Muted>;
+  }
+  if (o.output_type === 'open_vocab_detections') {
+    const queries = p.queries || [];
+    const rows = aggregateDetections(p.detections);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {queries.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Eyebrow>Configured to find</Eyebrow>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {queries.map((q) => (
+                <span key={q} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: AP.lumenBg, border: `1px solid ${AP.lumenLine}`, borderRadius: 999, padding: '3px 9px 3px 8px', fontFamily: AP.sans, fontSize: 12, fontWeight: 500, color: AP.lumenSoft }}>
+                  {q}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {rows.length ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {rows.map((r) => (
+              <ObjRow key={r.name} name={r.name} n={r.n} c={r.c} task={o.model_name} />
+            ))}
+          </div>
+        ) : <Muted>None of the configured terms were found.</Muted>}
+      </div>
+    );
+  }
+  if (o.output_type === 'segments') {
+    const segs = (p.segments || []).slice().sort((a, b) => b.area_fraction - a.area_fraction);
+    return segs.length ? (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <span style={{ display: 'flex', width: '100%', height: 14, borderRadius: 7, overflow: 'hidden' }}>
+          {segs.map((s) => (
+            <span key={s.label} style={{ width: `${Math.round(s.area_fraction * 100)}%`, background: objColor(o.model_name, s.label) }} />
+          ))}
+        </span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+          {segs.map((s) => (
+            <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: AP.sans, fontSize: 12, color: AP.ink2 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: objColor(o.model_name, s.label) }} />
+              {s.label} · {Math.round(s.area_fraction * 100)}%
+            </span>
+          ))}
+        </div>
+      </div>
+    ) : <Muted>No segments recorded.</Muted>;
+  }
+  if (o.output_type === 'annotations') {
+    const fields = p.fields || {};
+    const entries = Object.entries(fields);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {p.source === 'api' && <OffDeviceBadge provider={p.provider} />}
+        {entries.length ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '84px 1fr', gap: '8px 12px' }}>
+            {entries.map(([key, value]) => (
+              <React.Fragment key={key}>
+                <Eyebrow>{key}</Eyebrow>
+                {Array.isArray(value) ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {value.map((v, i) => (
+                      <span key={i} style={{ display: 'inline-flex', alignItems: 'center', background: 'rgba(255,255,255,0.04)', border: `1px solid ${AP.line2}`, borderRadius: 999, padding: '3px 9px', fontFamily: AP.sans, fontSize: 12, color: AP.ink2 }}>
+                        {String(v)}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span style={{ fontFamily: AP.sans, fontSize: 13, color: AP.ink }}>{String(value)}</span>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        ) : <Muted>No fields returned.</Muted>}
+      </div>
+    );
+  }
+  if (o.output_type === 'species') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+          <span style={{ fontFamily: AP.sans, fontSize: 17, fontWeight: 600, color: AP.ink, fontStyle: 'italic' }}>{p.name || 'Unidentified'}</span>
+          {p.confidence != null && <Meter v={p.confidence} />}
+        </div>
+        {p.taxonomy?.length > 0 && (
+          <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3, letterSpacing: '.01em' }}>{p.taxonomy.join(' › ')}</span>
+        )}
+      </div>
+    );
+  }
+  if (o.output_type === 'scene') {
+    const labels = p.labels || [];
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontFamily: AP.sans, fontSize: 13.5, color: AP.ink }}>
+            {labels.map((l) => l.label).join(', ') || 'No scene labels'}
+          </span>
+          {p.indoor_outdoor && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: STATUS.ok.bg, border: `1px solid ${STATUS.ok.line}`, borderRadius: 999, padding: '2px 9px 2px 8px' }}>
+              <span style={{ width: 6, height: 6, borderRadius: 99, background: STATUS.ok.c }} />
+              <span style={{ fontFamily: AP.sans, fontSize: 11, fontWeight: 500, color: STATUS.ok.c, textTransform: 'capitalize' }}>{p.indoor_outdoor}</span>
+            </span>
+          )}
+        </div>
+        {p.attributes?.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {p.attributes.map((a) => (
+              <span key={a} style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3, border: `1px solid ${AP.line2}`, borderRadius: 999, padding: '2px 8px' }}>{a}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (o.output_type === 'geo_estimate') {
+    const candidates = p.candidates || [];
+    return candidates.length ? (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {candidates.slice(0, 3).map((cand, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', opacity: i === 0 ? 1 : 0.6 }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+              <GeoGlyph />
+              <span style={{ fontFamily: AP.sans, fontSize: 12.5, color: AP.ink2 }}>{cand.region}</span>
+            </span>
+            <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.ink3 }}>{cand.confidence?.toFixed(2)}</span>
+          </div>
+        ))}
+      </div>
+    ) : <Muted>No location estimate.</Muted>;
+  }
+  if (o.output_type === 'depth') {
+    const marker = Math.round(Math.min(Math.max(p.median ?? 0.5, 0), 1) * 100);
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <Eyebrow>Depth</Eyebrow>
+        <span style={{ flex: 1, height: 8, borderRadius: 99, background: 'linear-gradient(90deg,#3a3f57,#8b7bf7,#f3d9b1)', position: 'relative' }}>
+          <span style={{ position: 'absolute', top: -2, left: `${marker}%`, width: 5, height: 12, borderRadius: 2, background: '#fff', boxShadow: `0 0 0 2px ${AP.card}` }} />
+        </span>
+        <span style={{ fontFamily: AP.mono, fontSize: 10.5, color: AP.ink3, whiteSpace: 'nowrap' }}>near → far</span>
+      </div>
+    );
   }
   return <Muted>{o.summary || 'Output recorded.'}</Muted>;
+}
+
+// Small, deliberately plain pin glyph for the geo/location card — not a full
+// map (nothing here is precise enough to earn one), just enough to read as
+// "place" at a glance.
+function GeoGlyph({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 21s-6-5.7-6-10.5A6 6 0 0 1 18 10.5C18 15.3 12 21 12 21z" stroke={AP.ink3} strokeWidth="1.7" />
+      <circle cx="12" cy="10.3" r="1.9" stroke={AP.ink3} strokeWidth="1.7" />
+    </svg>
+  );
+}
+
+// Small badge marking a stage that sent the image to a third-party API
+// (Claude, Google Cloud Vision, ...) rather than running locally — so a
+// viewer scanning the page can tell at a glance which stages left the
+// machine. `provider` defaults to a generic label when the payload doesn't
+// carry one.
+export function OffDeviceBadge({ provider }) {
+  return (
+    <span
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: '3px 9px 3px 7px', borderRadius: 999,
+        background: 'rgba(255,255,255,0.04)', border: `1px solid ${AP.line2}`,
+        fontFamily: AP.mono, fontSize: 10, color: AP.ink2, whiteSpace: 'nowrap',
+        alignSelf: 'flex-start',
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+        <path d="M7 16a4.5 4.5 0 0 1-.5-8.98A6 6 0 0 1 18 8.5 4 4 0 0 1 17.5 16H7z" stroke="currentColor" strokeWidth="2" />
+        <path d="M12 12v6M9.5 14.5 12 12l2.5 2.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      via {provider || 'external API'}
+    </span>
+  );
 }
 
 // The human label for one output's type — "Detections", "Caption", etc.
@@ -348,12 +671,101 @@ function WrittenImageIcon({ size = 13 }) {
     </svg>
   );
 }
+function ImageStatsIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4 20V10M10 20V4M16 20v-7M22 20V8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+function AestheticIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 3.5l2.47 5.6 6.03.55-4.58 4.06 1.36 5.9L12 16.7l-5.28 2.9 1.36-5.9-4.58-4.05 6.03-.56L12 3.5z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function FlagIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 3 2 20h20L12 3z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M12 10v4M12 17h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+function PaletteIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="8.5" cy="9.5" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="8.5" r="1.3" fill="currentColor" stroke="none" />
+      <circle cx="16" cy="14.5" r="1.3" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+function SegmentsIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M3 14h18M11 3v11" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+function AnnotationsIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function SpeciesIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 21s-7-5.2-7-11a7 7 0 0 1 14 0c0 5.8-7 11-7 11z" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="12" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+function SceneIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M3 18l5-6 4 4 4-7 5 9" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function GeoIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M12 21s-6-5.7-6-10.5A6 6 0 0 1 18 10.5C18 15.3 12 21 12 21z" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="12" cy="10.3" r="1.9" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+function DepthIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M3 12c2.5-5 5.5-8 9-8s6.5 3 9 8c-2.5 5-5.5 8-9 8s-6.5-3-9-8z" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="12" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
 const OUTPUT_ICON = {
   detections: DetectionsIcon,
   labels: ClassificationIcon,
   caption: CaptionIcon,
   ocr: OcrIcon,
   written_image: WrittenImageIcon,
+  image_stats: ImageStatsIcon,
+  aesthetic_score: AestheticIcon,
+  nsfw_flag: FlagIcon,
+  color_palette: PaletteIcon,
+  open_vocab_detections: DetectionsIcon,
+  segments: SegmentsIcon,
+  annotations: AnnotationsIcon,
+  species: SpeciesIcon,
+  scene: SceneIcon,
+  geo_estimate: GeoIcon,
+  depth: DepthIcon,
 };
 
 // The glyph for one output's type, or `null` for a type with no icon defined

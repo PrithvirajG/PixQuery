@@ -1,10 +1,14 @@
 """Filesystem ingestion: turning files on disk into assets, observations, and jobs.
 
-Renamed from ``FilesystemReconciler`` — the class was already shaped like a
-service (injected repository + publisher, no transport knowledge of its own),
-so this is a rename in place, not a restructuring. File-stability polling and
-the redispatch-on-manual-scan policy move with it as ingestion policy, the same
-way retry policy moved into ``PipelineExecutionService``.
+Split across two methods that different processes call: ``scan()`` (list files
++ detect deletions — the API's manual "Scan" route and the live watcher's
+periodic safety net) and ``observe_file()`` (hash one file, upsert records,
+create/dispatch its job — the pipeline-worker's ``FileObservationConsumer``,
+one file per message). Nothing that *lists* a workspace hashes files or creates
+jobs anymore, and nothing that hashes a file needs to know how it was found —
+see ``consumer/processing/file_observation_consumer.py`` for how the two sides
+connect over the ``file_observations`` queue. ``reconcile()`` composes both in
+one process for tests/CLI use; production code no longer calls it.
 """
 
 from __future__ import annotations
@@ -52,11 +56,11 @@ class ReconciliationService:
         *,
         assets: ImageAssetsRepository,
         observations: FileObservationsRepository,
-        jobs: ProcessingJobsRepository,
-        pipelines: PipelineDefinitionsRepository,
-        publisher: Publisher | None,
         workspace_path: str,
         workspace_id: str,
+        jobs: ProcessingJobsRepository | None = None,
+        pipelines: PipelineDefinitionsRepository | None = None,
+        publisher: Publisher | None = None,
         pipeline_id: str | None = None,
         pipeline_version: str | None = None,
         pipeline_ids: list[str] | None = None,
@@ -89,15 +93,44 @@ class ReconciliationService:
         self.stable_interval_seconds = stable_interval_seconds
         self.stable_timeout_seconds = stable_timeout_seconds
 
-    async def reconcile(self, *, redispatch_failed: bool = False) -> list[str]:
+    def scan(self) -> list[Path]:
+        """List current files, mark missing/deleted observations, refresh asset
+        activity, and return the still-present file paths — no hashing, no job
+        creation (see ``observe_file`` for that), so this needs only ``assets``/
+        ``observations`` (not ``jobs``/``pipelines``/``publisher``).
+
+        Detecting a *deletion* needs the complete current file listing in one
+        pass (there's no per-file event for "this file is gone"), so this is
+        the one place that work can happen — whoever does the listing (the
+        API's manual Scan, the watcher's periodic safety net) calls this, then
+        hands each returned path off independently (``observe_file``, run by
+        the pipeline-worker) for the actual hash/upsert/job-create step. That
+        split is why a plain file listing doesn't need `jobs`/`pipelines` at
+        all: this method never touches those collections.
+        """
         active_paths: set[str] = set()
-        queued_job_ids: list[str] = []
+        found: list[Path] = []
         for path in self.iter_image_files():
-            relative_path = self.relative_path(path)
-            active_paths.add(relative_path)
-            queued_job_ids.extend(await self.observe_file(path, redispatch_failed=redispatch_failed))
+            active_paths.add(self.relative_path(path))
+            found.append(path)
         self.observations.mark_missing(self.workspace_id, active_paths)
         self._refresh_asset_activity()
+        return found
+
+    async def reconcile(self, *, redispatch_failed: bool = False) -> list[str]:
+        """``scan()`` + ``observe_file()`` for every result, all in this process.
+
+        Not used by the production flow anymore — the API's Scan route and the
+        live watcher now publish each file as its own ``{workspace_id, path}``
+        message for the pipeline-worker to observe independently (see
+        ``consumer/processing/file_observation_consumer.py``), so listing and
+        per-file hashing/job-creation can happen in different processes. Kept
+        here for tests and any single-process/CLI use, since it needs
+        ``jobs``/``pipelines``/``publisher`` (unlike ``scan()`` alone).
+        """
+        queued_job_ids: list[str] = []
+        for path in self.scan():
+            queued_job_ids.extend(await self.observe_file(path, redispatch_failed=redispatch_failed))
         return queued_job_ids
 
     def _refresh_asset_activity(self) -> None:
@@ -112,14 +145,27 @@ class ReconciliationService:
         for asset_id in self.assets.list_all_ids():
             self.assets.set_active(asset_id, asset_id in active_asset_ids)
 
+    def _is_managed_output(self, path: Path) -> bool:
+        """True for anything under this workspace's ``pixquery_output`` folder.
+
+        Checked in both ``iter_image_files`` (the periodic/manual scan) and
+        ``observe_file`` (also called directly by the live filesystem watcher's
+        event handler, which never goes through ``iter_image_files``). Guarding
+        only the scan path used to let the watcher re-ingest every image an
+        ``image_write`` node wrote as a brand-new source file — process → write
+        → watcher event → ingest → process → write again, looping forever.
+        """
+        try:
+            relative = path.relative_to(self.workspace_path)
+        except ValueError:
+            return False
+        return PIPELINE_OUTPUT_DIRNAME in relative.parts
+
     def iter_image_files(self):
         if not self.workspace_path.exists():
             return
         for path in self.workspace_path.rglob("*"):
-            # Skip the pipeline's own output folder so images written by an
-            # ``image_write`` node are never re-ingested as new source files
-            # (which would loop: process → write → ingest → process → …).
-            if PIPELINE_OUTPUT_DIRNAME in path.relative_to(self.workspace_path).parts:
+            if self._is_managed_output(path):
                 continue
             if path.is_file() and path.suffix.lower() in self.extensions:
                 yield path
@@ -127,6 +173,8 @@ class ReconciliationService:
     async def observe_file(self, path: str | Path, *, redispatch_failed: bool = False) -> list[str]:
         path = Path(path).expanduser().resolve()
         if path.suffix.lower() not in self.extensions or not path.exists():
+            return []
+        if self._is_managed_output(path):
             return []
         await wait_for_stable_file(
             path,
@@ -161,6 +209,9 @@ class ReconciliationService:
         # in-flight jobs are never touched either way.
         queued_job_ids: list[str] = []
         for pipeline_id, pipeline_version in self.pipelines_to_run:
+            if self._is_empty_pipeline(pipeline_id):
+                logger.debug("Skipping pipeline %s: it has no stages", pipeline_id)
+                continue
             version = pipeline_version or self._resolve_pipeline_version(pipeline_id)
             job, created = self.jobs.get_or_create(
                 asset_id=asset["_id"],
@@ -200,6 +251,18 @@ class ReconciliationService:
                 error=job.get("last_error"),
             )
         )
+
+    def _is_empty_pipeline(self, pipeline_id: str) -> bool:
+        """True for a stored pipeline with no stages — there is nothing to run.
+
+        Not the same as a pipeline with no stored definition: that is the legacy
+        ``default_image_analysis`` id, which still runs the built-in default chain.
+        Treating the two alike made a fresh (or emptied) user pipeline silently run
+        YOLO → BLIP → CLIP. Once stages are added the definition hashes to a real
+        version, so the next reconcile creates its jobs.
+        """
+        definition = self.pipelines.get(pipeline_id)
+        return definition is not None and not definition.get("nodes")
 
     def _resolve_pipeline_version(self, pipeline_id: str) -> str:
         """Derive a job's pipeline_version from the stored definition.

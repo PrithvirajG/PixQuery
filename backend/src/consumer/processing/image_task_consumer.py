@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from src.config import EVENTS_ENABLED, MONGO_DB_NAME, MONGO_URI
 from src.infrastructure.messaging import EventSink, RabbitConsumer
+from src.infrastructure.ml.gpu import is_cuda_fatal, is_cuda_oom, residency
 from src.publisher.events import EventPublisher
 from src.infrastructure.vector_store import WeaviateEmbeddingStore
 from src.logging_config import get_logger, request_scope
@@ -13,6 +14,7 @@ from src.repositories.pipeline_definitions_repository import PipelineDefinitions
 from src.repositories.pipeline_nodes_repository import PipelineNodesRepository
 from src.repositories.pipeline_runs_repository import PipelineRunsRepository
 from src.repositories.processing_jobs_repository import ProcessingJobsRepository
+from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.pipeline_execution_service import PipelineExecutionService
 
 
@@ -37,10 +39,14 @@ class ImageProcessorConsumer(RabbitConsumer):
             assets=ImageAssetsRepository(database),
             pipelines=PipelineDefinitionsRepository(database),
             nodes=PipelineNodesRepository(database),
+            workspaces=WorkspaceDefinitionsRepository(database),
             embedding_store=self.embedding_store,
             event_sink=self.event_sink,
         )
         self.event_bus: EventPublisher | None = None
+        # Set when a CUDA failure leaves this process unable to run any model;
+        # start_pipeline_worker waits on it and exits.
+        self.fatal = asyncio.Event()
 
     async def connect(self):
         await super().connect()
@@ -63,10 +69,30 @@ class ImageProcessorConsumer(RabbitConsumer):
                 self.logger.info("Processing job_id=%s", job_id)
                 try:
                     await asyncio.to_thread(self.pipeline.run_job, job_id)
-                except Exception:
+                except Exception as exc:
                     self.logger.exception("Failed job_id=%s", job_id)
                     job = self.jobs.get(job_id)
-                    if job and job.get("status") == "queued":
+                    still_queued = bool(job and job.get("status") == "queued")
+                    if is_cuda_fatal(exc):
+                        # The CUDA context is unusable: every later job in this
+                        # process would fail instantly the same way. Put this job
+                        # straight back on the (durable) queue, then stop so a
+                        # restart gets a clean GPU.
+                        if still_queued:
+                            await self._republish_after_backoff(job_id, None)
+                        self.logger.critical(
+                            "Unrecoverable CUDA error on job_id=%s — shutting the worker down; "
+                            "restart it to continue (the job is back on the queue)", job_id,
+                        )
+                        self.fatal.set()
+                        return
+                    if is_cuda_oom(exc):
+                        self.logger.warning(
+                            "CUDA out of memory on job_id=%s — parking models and clearing the "
+                            "GPU cache before the retry", job_id,
+                        )
+                        await asyncio.to_thread(residency.park_all)
+                    if still_queued:
                         asyncio.create_task(
                             self._republish_after_backoff(job_id, job.get("next_attempt_at"))
                         )

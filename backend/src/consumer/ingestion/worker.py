@@ -1,25 +1,24 @@
 """Filesystem monitoring worker entry point.
 
-Consolidates the monitor process's two consumers: ``WorkspaceWatcher``
-(filesystem-driven, one watchdog Observer per workspace) and
-``ScanCommandConsumer`` (RabbitMQ-driven, one manual re-scan request per
-message) — see ``filesystem_watcher.py`` and ``scan_command_consumer.py``.
+Runs ``WorkspaceWatcher`` only — live file-system events plus the periodic
+safety-net reconcile. The manual "Scan" button no longer has any consumer
+here: the API's ``/scan`` route lists the workspace and publishes observations
+itself (see ``api/routes/rest/workspaces.py``), so Scan works whenever the API
+and pipeline-worker are running, independent of this process. This process is
+now purely a *detector*: it never touches ``image_assets``/
+``file_observations``/``processing_jobs``.
 """
 from __future__ import annotations
 
 import asyncio
 
-from src.config import EVENTS_ENABLED, MONGO_DB_NAME, MONGO_URI, WORKSPACE_REFRESH_INTERVAL
+from src.config import MONGO_DB_NAME, MONGO_URI, WORKSPACE_REFRESH_INTERVAL
 from src.consumer.ingestion.filesystem_watcher import WorkspaceWatcher
-from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
-from src.infrastructure.messaging import EventSink, RabbitPublisher
+from src.infrastructure.messaging import RabbitPublisher
 from src.logging_config import get_logger
-from src.publisher.events import EventPublisher
 from src.repositories.bootstrap import ensure_schema
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.image_assets_repository import ImageAssetsRepository
-from src.repositories.pipeline_definitions_repository import PipelineDefinitionsRepository
-from src.repositories.processing_jobs_repository import ProcessingJobsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 
 logger = get_logger(__name__)
@@ -36,47 +35,21 @@ async def start_file_watcher() -> None:
     workspaces = WorkspaceDefinitionsRepository(database)
     assets = ImageAssetsRepository(database)
     observations = FileObservationsRepository(database)
-    jobs = ProcessingJobsRepository(database)
-    pipelines = PipelineDefinitionsRepository(database)
 
     publisher = RabbitPublisher()
     await publisher.connect()
-
-    # The monitor is where a newly-discovered image first becomes a queued job, so
-    # it emits the transition that makes an image appear as "Queued" in an open UI.
-    event_sink = EventSink()
-    bus = None
-    if EVENTS_ENABLED:
-        try:
-            candidate = EventPublisher()
-            await candidate.connect()
-            bus = candidate
-            event_sink.set(bus.emit)
-        except Exception as exc:
-            logger.warning("Live events disabled in monitor: %s", exc)
 
     loop = asyncio.get_running_loop()
     watcher = WorkspaceWatcher(
         workspaces=workspaces,
         assets=assets,
         observations=observations,
-        jobs=jobs,
-        pipelines=pipelines,
         publisher=publisher,
         loop=loop,
-        event_sink=event_sink,
     )
 
     # Initial sync
     await watcher.sync()
-
-    # Scan-command consumer registers its on_message callback and returns —
-    # same non-blocking connect()/start_consuming() shape as ImageProcessorConsumer,
-    # so no extra task is needed to pump it; the refresh loop below keeps the
-    # event loop alive for both.
-    scan_consumer = ScanCommandConsumer(watcher)
-    await scan_consumer.connect()
-    await scan_consumer.start_consuming()
 
     logger.info(
         "Monitor running. Workspace refresh every %ds.", WORKSPACE_REFRESH_INTERVAL
@@ -90,9 +63,5 @@ async def start_file_watcher() -> None:
             # Periodic full reconcile for all active workspaces
             await watcher.reconcile_all()
     finally:
-        await scan_consumer.close()
         watcher.stop_all()
         await publisher.close()
-        if bus:
-            event_sink.set(None)
-            await bus.close()

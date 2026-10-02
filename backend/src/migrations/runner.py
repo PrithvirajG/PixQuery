@@ -40,6 +40,48 @@ def _baseline(db: Any) -> None:
     ensure_schema(db)
 
 
+def _rename_captioning_to_vision_language_model(db: Any) -> None:
+    """Rename the system Captioning node's identity to "vision_language_model".
+
+    The node's job widened from "always produce one unconditioned caption"
+    (BLIP only) to "run a configurable prompt through a vision-language model"
+    (now also Qwen2-VL-2B-Instruct) — the old name undersold what it does.
+
+    This only moves the node's *identity* (``node_type``, the registry key
+    executors are resolved by): the ``_id`` is preserved, so every existing
+    pipeline's ``nodes[].pipeline_node_id`` reference — which points at that
+    _id, never at the node_type string — keeps resolving to the same row and
+    is transparently upgraded to the new capability (with the default prompt
+    written into that row's ``default_config`` by the next seed, since an
+    existing node's ``config_overrides`` for this stage is ``{}``). The
+    managed fields themselves (name, config_schema, default_config, ...) are
+    re-applied by ``seed_system_nodes()`` afterward, same as any other
+    code-owned field change — this migration's only job is the rename.
+
+    Handles both possible orderings, because ``seed_system_nodes()`` runs on
+    every process start (api/pipeline-worker/file-watcher), independent of
+    migrations — there is no guarantee this migration runs before some
+    process has already seeded a brand-new "vision_language_model" row under
+    the new code:
+      - Migration-first: only the old "captioning" row exists -> rename it.
+      - Seed-first: a fresh "vision_language_model" row already exists (no
+        pipeline could reference it yet — it didn't exist before) alongside
+        the original "captioning" row (which existing pipelines DO
+        reference) -> discard the fresh duplicate, rename the original. The
+        partial-unique index on system node_type would otherwise reject the
+        rename while both rows exist, so the duplicate must go first.
+      - Already migrated / fresh install with no legacy row: no-op.
+    """
+    nodes = db["pipeline_nodes"]
+    old = nodes.find_one({"node_type": "captioning", "owner_id": "system"})
+    if old is None:
+        return  # nothing to migrate
+    new = nodes.find_one({"node_type": "vision_language_model", "owner_id": "system"})
+    if new is not None and new["_id"] != old["_id"]:
+        nodes.delete_one({"_id": new["_id"]})
+    nodes.update_one({"_id": old["_id"]}, {"$set": {"node_type": "vision_language_model"}})
+
+
 def _resync_system_nodes(db: Any) -> None:
     """Refresh system nodes that were frozen at their original seed.
 
@@ -71,6 +113,13 @@ MIGRATIONS: list[Migration] = [
         id="0002_resync_system_nodes",
         description="Re-apply code-owned fields to system pipeline nodes frozen at first seed.",
         upgrade=_resync_system_nodes,
+    ),
+    Migration(
+        id="0003_rename_captioning_to_vision_language_model",
+        description="Rename the Captioning system node's identity to vision_language_model "
+        "(same _id, so existing pipelines keep resolving it) ahead of its widened, "
+        "prompt-configurable, multi-model capability.",
+        upgrade=_rename_captioning_to_vision_language_model,
     ),
 ]
 

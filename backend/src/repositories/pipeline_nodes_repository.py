@@ -36,23 +36,27 @@ class PipelineNodesRepository:
             pass
 
     _SYSTEM_NODES = [
+        # Which *model* a node runs is not config: it's the pipeline node's own
+        # `model` field, chosen from the executor's `models` list (see
+        # services/executors/base.py). So no entry here carries a "model" key.
         {
-            "name": "Object Detection (YOLOv8)",
-            "description": "Detects objects using YOLOv8 and returns their bounding boxes.",
+            "name": "Object Detection",
+            "description": "Detects objects (YOLOv8) and returns labelled bounding boxes.",
             "node_type": "object_detection",
             "context_inputs": ["image"],
             "context_outputs": ["detections"],
-            "config_schema": {"model": {"type": "string"}, "threshold": {"type": "number"}},
-            "default_config": {"model": "yolov8n", "threshold": 0.5},
+            "config_schema": {"confidence": {"type": "number"}},
+            "default_config": {"confidence": 0.25},
         },
         {
-            "name": "Image Captioning (BLIP)",
-            "description": "Generates a natural language caption for the image.",
-            "node_type": "captioning",
+            "name": "Vision Language Model",
+            "description": "Answers a configurable prompt about the image (or, with BLIP, "
+            "generates one unconditioned caption — BLIP has no prompt support).",
+            "node_type": "vision_language_model",
             "context_inputs": ["image"],
             "context_outputs": ["caption"],
-            "config_schema": {"model": {"type": "string"}},
-            "default_config": {"model": "blip-base"},
+            "config_schema": {"prompt": {"type": "string"}},
+            "default_config": {"prompt": "Describe this image in one concise sentence."},
         },
         {
             "name": "CLIP Embedding",
@@ -60,25 +64,21 @@ class PipelineNodesRepository:
             "node_type": "embedding",
             "context_inputs": ["image"],
             "context_outputs": ["embeddings"],
-            "config_schema": {"model": {"type": "string"}},
-            "default_config": {"model": "openai/clip-vit-base-patch32"},
+            "config_schema": {},
+            "default_config": {},
         },
         {
             "name": "Face Detection",
-            "description": "Detects human faces (OpenCV Haar cascade) as bounding-box detections.",
+            "description": "Detects human faces as bounding-box detections.",
             "node_type": "face_detection",
             "context_inputs": ["image"],
             "context_outputs": ["detections"],
-            "config_schema": {
-                "scale_factor": {"type": "number"},
-                "min_neighbors": {"type": "integer"},
-                "min_size": {"type": "integer"},
-            },
-            "default_config": {"scale_factor": 1.1, "min_neighbors": 5, "min_size": 30},
+            "config_schema": {"confidence_threshold": {"type": "number"}},
+            "default_config": {"confidence_threshold": 0.5},
         },
         {
             "name": "Image Classification",
-            "description": "Classifies the image into top-N ImageNet categories (MobileNetV3).",
+            "description": "Classifies the image into top-N ImageNet categories.",
             "node_type": "classification",
             "context_inputs": ["image"],
             "context_outputs": ["labels"],
@@ -116,7 +116,6 @@ class PipelineNodesRepository:
                 "quality": {"type": "integer"},
             },
             "default_config": {
-                "directory": "pixquery_output",
                 "filename": "{stem}.{ext}",
                 "format": "jpeg",
                 "quality": 90,

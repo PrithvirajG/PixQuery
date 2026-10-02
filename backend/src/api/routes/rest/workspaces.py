@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -5,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.dependencies import get_current_user, get_workspace_service
-from src.config import SCAN_COMMAND_QUEUE
+from src.config import FILE_OBSERVATION_QUEUE
 from src.errors.workspaces import WorkspaceAccessError, WorkspaceValidationError
 from src.infrastructure.messaging import RabbitPublisher
 from src.logging_config import get_logger
@@ -145,32 +146,50 @@ async def scan_workspace(
     workspace_service: WorkspaceService = Depends(get_workspace_service),
     current_user: dict = Depends(get_current_user),
 ):
+    """List the workspace now and dispatch each file for independent ingestion.
+
+    Does the listing synchronously, right here (cheap — a directory walk, no
+    hashing), then publishes one ``file_observations`` message per file for
+    the pipeline-worker's ``FileObservationConsumer`` to actually hash/upsert/
+    dispatch. No dependency on the file-watcher process at all — this works
+    whenever the API and pipeline-worker are running. ``redispatch_failed`` is
+    always True here: a human explicitly asking to re-check a workspace is
+    exactly when retrying a previously-failed job makes sense (the live
+    watcher's own automatic observations never set this).
+    """
     try:
-        workspace = workspace_service.trigger_scan(workspace_id, owner_id=current_user["_id"])
+        result = workspace_service.scan_workspace(workspace_id, owner_id=current_user["_id"])
     except WorkspaceAccessError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except WorkspaceValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not workspace:
+    if not result:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Publish a scan command so the file-watcher triggers an immediate reconcile.
-    # correlation_id defaults to this request's bound trace id (RabbitPublisher.publish),
-    # so the file-watcher's ScanCommandConsumer and the pipeline-worker jobs it
-    # dispatches all log under the same id as this request.
+    # correlation_id defaults to this request's bound trace id
+    # (RabbitPublisher.publish), so the pipeline-worker's FileObservationConsumer
+    # and the image_task job it dispatches all log under the same id as this request.
+    published = 0
     try:
-        publisher = RabbitPublisher(queue_name=SCAN_COMMAND_QUEUE)
+        publisher = RabbitPublisher(queue_name=FILE_OBSERVATION_QUEUE)
         await publisher.connect()
         try:
-            await publisher.publish(workspace_id)
+            for path in result["paths"]:
+                await publisher.publish(json.dumps({
+                    "workspace_id": workspace_id,
+                    "path": str(path),
+                    "redispatch_failed": True,
+                }))
+                published += 1
         finally:
             await publisher.close()
-        logger.info("Scan command published workspace_id=%s", workspace_id)
+        logger.info("Scan dispatched workspace_id=%s files=%d", workspace_id, published)
     except Exception:
-        # Best-effort; the file-watcher's periodic refresh will pick it up anyway.
-        logger.warning("Could not publish scan command for workspace_id=%s", workspace_id, exc_info=True)
+        # Best-effort; a failed publish here just means that one file waits for
+        # the next manual Scan or (if the watcher is running) its periodic pass.
+        logger.warning("Could not dispatch scan for workspace_id=%s", workspace_id, exc_info=True)
 
-    return {"message": "Scan triggered", "workspace": workspace}
+    return {"message": "Scan triggered", "files_found": published, "workspace": result["workspace"]}
 
 
 @router.delete("/{workspace_id}/pipelines/{pipeline_id}/outputs")

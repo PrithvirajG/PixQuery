@@ -1,12 +1,67 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any
 
 from src.config import WEAVIATE_URL
 from src.infrastructure.vector_store.protocol import VectorHit
+
+# Every embedding-class property list shares this shape; TextEmbedding adds `text`.
+_IMAGE_PROPERTIES = [
+    {"name": "asset_id", "dataType": ["text"]},
+    {"name": "content_sha256", "dataType": ["text"]},
+    {"name": "workspace_id", "dataType": ["text"]},
+    {"name": "pipeline_id", "dataType": ["text"]},
+    {"name": "pipeline_version", "dataType": ["text"]},
+    {"name": "active", "dataType": ["boolean"]},
+]
+_TEXT_PROPERTIES = [
+    {"name": "asset_id", "dataType": ["text"]},
+    {"name": "content_sha256", "dataType": ["text"]},
+    {"name": "workspace_id", "dataType": ["text"]},
+    {"name": "text", "dataType": ["text"]},
+    {"name": "pipeline_id", "dataType": ["text"]},
+    {"name": "pipeline_version", "dataType": ["text"]},
+    {"name": "active", "dataType": ["boolean"]},
+]
+
+# "clip" is the one embedding model id that predates per-model classes — every
+# vector ever written for it lives in the plain "ImageEmbedding"/"TextEmbedding"
+# classes, so it keeps those exact names rather than getting a suffixed one.
+# Weaviate has no rename-class operation, so this is what makes adding a new
+# embedding model migration-free: existing data and queries for "clip" are
+# untouched, and every other model just gets its own freshly-created class.
+_LEGACY_IMAGE_CLASS = {"clip": "ImageEmbedding"}
+_LEGACY_TEXT_CLASS = {"clip": "TextEmbedding"}
+
+
+def image_class_name(model_id: str) -> str:
+    """The Weaviate class an embedding model's image vectors live in.
+
+    One class per model, never shared: Weaviate's HNSW index requires every
+    vector in a class to have the same length, and different embedding models
+    produce different-length (or same-length but not comparable — CLIP vs.
+    DINOv2 both happen to be 768-d) vectors. Mixing them in one class either
+    fails the insert outright or makes nearest-neighbour queries meaningless.
+    """
+    return _LEGACY_IMAGE_CLASS.get(model_id) or f"ImageEmbedding{_pascal(model_id)}"
+
+
+def text_class_name(model_id: str) -> str:
+    """The Weaviate class an embedding model's text (caption) vectors live in.
+
+    Only ever called for a model with ``ModelSpec.supports_text`` — a model with
+    no text tower (DINOv2) never has caption vectors to store or query.
+    """
+    return _LEGACY_TEXT_CLASS.get(model_id) or f"TextEmbedding{_pascal(model_id)}"
+
+
+def _pascal(model_id: str) -> str:
+    """``"clip_vit_l14"`` -> ``"ClipVitL14"`` — a valid Weaviate class-name suffix."""
+    return "".join(part.capitalize() for part in re.split(r"[_\-]+", model_id) if part)
 
 
 class _WeaviateHttp:
@@ -94,45 +149,33 @@ class WeaviateSearchClient(_WeaviateHttp):
 class WeaviateEmbeddingStore(_WeaviateHttp):
     def __init__(self, url: str = WEAVIATE_URL):
         super().__init__(url)
+        # Classes confirmed to exist this process, so a busy pipeline worker
+        # doesn't re-check schema on every single upsert — see _ensure_class.
+        self._known_classes: set[str] = set()
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
-        for class_name, properties in {
-            "ImageEmbedding": [
-                {"name": "asset_id", "dataType": ["text"]},
-                {"name": "content_sha256", "dataType": ["text"]},
-                {"name": "workspace_id", "dataType": ["text"]},
-                {"name": "pipeline_id", "dataType": ["text"]},
-                {"name": "pipeline_version", "dataType": ["text"]},
-                {"name": "active", "dataType": ["boolean"]},
-            ],
-            "TextEmbedding": [
-                {"name": "asset_id", "dataType": ["text"]},
-                {"name": "content_sha256", "dataType": ["text"]},
-                {"name": "workspace_id", "dataType": ["text"]},
-                {"name": "text", "dataType": ["text"]},
-                {"name": "pipeline_id", "dataType": ["text"]},
-                {"name": "pipeline_version", "dataType": ["text"]},
-                {"name": "active", "dataType": ["boolean"]},
-            ],
-        }.items():
-            if self._exists(f"/v1/schema/{class_name}"):
-                continue
-            self._request(
-                "POST",
-                "/v1/schema",
-                {
-                    "class": class_name,
-                    "vectorizer": "none",
-                    "properties": properties,
-                },
-            )
+        # Only the legacy default-model classes are created eagerly, matching
+        # what every deployment already has. Every other embedding model's
+        # classes are created lazily, on that model's first upsert (_ensure_class)
+        # — so adding a model to EmbeddingExecutor never requires a schema-side
+        # deploy step here.
+        self._ensure_class("ImageEmbedding", _IMAGE_PROPERTIES)
+        self._ensure_class("TextEmbedding", _TEXT_PROPERTIES)
 
-    def upsert_image_embedding(self, *, vector: list[float], properties: dict[str, Any]) -> None:
-        self._upsert("ImageEmbedding", "image", vector, properties)
+    def upsert_image_embedding(
+        self, *, vector: list[float], properties: dict[str, Any], model_id: str = "clip"
+    ) -> None:
+        class_name = image_class_name(model_id)
+        self._ensure_class(class_name, _IMAGE_PROPERTIES)
+        self._upsert(class_name, "image", vector, properties)
 
-    def upsert_text_embedding(self, *, vector: list[float], properties: dict[str, Any]) -> None:
-        self._upsert("TextEmbedding", "text", vector, properties)
+    def upsert_text_embedding(
+        self, *, vector: list[float], properties: dict[str, Any], model_id: str = "clip"
+    ) -> None:
+        class_name = text_class_name(model_id)
+        self._ensure_class(class_name, _TEXT_PROPERTIES)
+        self._upsert(class_name, "text", vector, properties)
 
     def close(self) -> None:
         return None
@@ -163,6 +206,17 @@ class WeaviateEmbeddingStore(_WeaviateHttp):
                 self._request("PUT", f"/v1/objects/{obj_id}", body)
             else:
                 raise
+
+    def _ensure_class(self, class_name: str, properties: list[dict[str, Any]]) -> None:
+        if class_name in self._known_classes:
+            return
+        if not self._exists(f"/v1/schema/{class_name}"):
+            self._request(
+                "POST",
+                "/v1/schema",
+                {"class": class_name, "vectorizer": "none", "properties": properties},
+            )
+        self._known_classes.add(class_name)
 
     def _exists(self, path: str) -> bool:
         try:

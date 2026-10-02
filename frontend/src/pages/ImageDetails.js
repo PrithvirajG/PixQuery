@@ -171,9 +171,41 @@ export default function ImageDetails() {
   const [live, setLive] = useState({});
   const [connected, setConnected] = useState(false);
   const [railWidth, setRailWidth] = useState(readStoredRailWidth);
+  // Which `written_image` output is currently held up against the original, and
+  // where the wipe divider sits (percent from the left). Null = not comparing.
+  const [compare, setCompare] = useState(null);
+  const [splitPct, setSplitPct] = useState(50);
   const imgRef = useRef(null);
+  const photoRef = useRef(null);
+  const draggingSplit = useRef(false);
   const workspaceRef = useRef(null);
   const everConnected = useRef(false);
+
+  // Dragging the compare divider. Listeners sit on the window so the pointer can
+  // leave the image mid-drag without the wipe sticking — same reasoning as the
+  // rail's resize handle.
+  useEffect(() => {
+    if (!compare) return undefined;
+    const move = (e) => {
+      if (!draggingSplit.current || !photoRef.current) return;
+      const rect = photoRef.current.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      setSplitPct(Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100)));
+    };
+    const stop = () => {
+      draggingSplit.current = false;
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', stop);
+    window.addEventListener('touchmove', move);
+    window.addEventListener('touchend', stop);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', stop);
+      window.removeEventListener('touchmove', move);
+      window.removeEventListener('touchend', stop);
+    };
+  }, [compare]);
 
   const refetch = useCallback(
     () =>
@@ -275,6 +307,16 @@ export default function ImageDetails() {
   // Fallback polling — only when the socket is down AND something is in flight,
   // so a broker outage degrades to the old behaviour instead of freezing the UI.
   const anyInFlight = viewPipelines.some((p) => IN_FLIGHT.has(p.state));
+
+  // Outputs can vanish under a running comparison (reprocess, clear outputs) —
+  // drop it rather than leave the overlay pointing at a file that now 404s.
+  useEffect(() => {
+    if (!compare) return;
+    const stillThere = viewPipelines.some((p) =>
+      (p.outputs ?? []).some((o) => o.id === compare.outputId)
+    );
+    if (!stillThere) setCompare(null);
+  }, [viewPipelines, compare]);
   useEffect(() => {
     if (connected || !anyInFlight) return undefined;
     const timer = setInterval(refetch, 4000);
@@ -419,7 +461,7 @@ export default function ImageDetails() {
   const detections = viewPipelines.flatMap((p) =>
     enabled[p.pipeline_id ?? '_default']
       ? (p.outputs ?? []).flatMap((o) =>
-          o.output_type === 'detections'
+          o.output_type === 'detections' || o.output_type === 'open_vocab_detections'
             // __task carries the producing model into the overlay so its box
             // colour matches ObjRow's swatch for the same detection (objColor
             // is keyed by task + label, not label alone).
@@ -508,6 +550,7 @@ export default function ImageDetails() {
         {/* image */}
         <div style={{ flex: 1, minWidth: 0, padding: 20, display: 'flex' }}>
           <div
+            ref={photoRef}
             className="ap-photo"
             style={{
               flex: 1,
@@ -525,7 +568,23 @@ export default function ImageDetails() {
               onLoad={(e) => setNaturalDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }}
             />
-            {showBoxes && (
+            {/* Comparing: the written image sits on top of the original, wiped in
+                from the right by the divider. Same `object-fit: contain` box, so
+                the two line up pixel for pixel. */}
+            {compare && (
+              <img
+                src={`${API}/images/${id}/outputs/${compare.outputId}/file`}
+                alt={compare.label}
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  objectFit: 'contain', zIndex: 2,
+                  clipPath: `inset(0 0 0 ${splitPct}%)`,
+                }}
+              />
+            )}
+            {/* Boxes describe the ORIGINAL, so they'd misread over a transformed
+                copy — drop them for the duration of the comparison. */}
+            {showBoxes && !compare && (
               <DetectionOverlay
                 detections={detections}
                 naturalW={naturalDims.w}
@@ -533,6 +592,48 @@ export default function ImageDetails() {
                 hiddenLabels={hiddenLabels}
                 hoveredLabel={hoveredLabel}
               />
+            )}
+            {compare && (
+              <>
+                <div
+                  style={{
+                    position: 'absolute', top: 0, bottom: 0, left: `${splitPct}%`,
+                    width: 2, background: AP.lumenSoft, zIndex: 4,
+                    boxShadow: '0 0 8px rgba(140,124,247,.7)', pointerEvents: 'none',
+                  }}
+                />
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Compare divider"
+                  onMouseDown={(e) => { draggingSplit.current = true; e.preventDefault(); }}
+                  onTouchStart={() => { draggingSplit.current = true; }}
+                  style={{
+                    position: 'absolute', top: 0, bottom: 0,
+                    left: `calc(${splitPct}% - 14px)`, width: 28,
+                    cursor: 'ew-resize', zIndex: 5,
+                  }}
+                />
+                <span
+                  style={{
+                    position: 'absolute', top: '50%', left: `${splitPct}%`,
+                    transform: 'translate(-50%, -50%)', zIndex: 5,
+                    width: 22, height: 22, borderRadius: 99,
+                    background: AP.lumen, border: `2px solid ${AP.ink}`,
+                    boxShadow: '0 1px 6px rgba(0,0,0,.5)', pointerEvents: 'none',
+                  }}
+                />
+                {/* Which half is which — otherwise a grayscale/resized copy is
+                    indistinguishable from the original at a glance. */}
+                <div style={{ position: 'absolute', top: 14, left: 16, right: 16, zIndex: 5, display: 'flex', justifyContent: 'space-between', pointerEvents: 'none' }}>
+                  <span style={{ fontFamily: AP.mono, fontSize: 11, color: '#fff', background: 'rgba(8,9,15,.6)', border: '1px solid rgba(255,255,255,.14)', borderRadius: 8, padding: '4px 9px' }}>
+                    original
+                  </span>
+                  <span style={{ fontFamily: AP.mono, fontSize: 11, color: AP.lumenSoft, background: 'rgba(8,9,15,.6)', border: `1px solid ${AP.lumenLine}`, borderRadius: 8, padding: '4px 9px' }}>
+                    {compare.label}
+                  </span>
+                </div>
+              </>
             )}
             <span className="ap-vig" />
             <div
@@ -732,7 +833,24 @@ export default function ImageDetails() {
                                   })
                                 }
                               >
-                                <OutputBody o={o} detectionState={detectionState} />
+                                <OutputBody
+                                  o={o}
+                                  detectionState={detectionState}
+                                  writtenImage={
+                                    o.output_type === 'written_image' && o.id
+                                      ? {
+                                          src: `${API}/images/${id}/outputs/${o.id}/file`,
+                                          comparing: compare?.outputId === o.id,
+                                          onToggleCompare: () =>
+                                            setCompare((c) =>
+                                              c?.outputId === o.id
+                                                ? null
+                                                : { outputId: o.id, label: outputLabel(o) }
+                                            ),
+                                        }
+                                      : undefined
+                                  }
+                                />
                               </StageCard>
                             );
                           })}

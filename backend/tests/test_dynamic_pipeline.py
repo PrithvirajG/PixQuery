@@ -43,11 +43,11 @@ class FakeEmbeddingStore:
         self.image_upserts = []
         self.text_upserts = []
 
-    def upsert_image_embedding(self, *, vector, properties):
-        self.image_upserts.append((vector, properties))
+    def upsert_image_embedding(self, *, vector, properties, model_id="clip"):
+        self.image_upserts.append((vector, properties, model_id))
 
-    def upsert_text_embedding(self, *, vector, properties):
-        self.text_upserts.append((vector, properties))
+    def upsert_text_embedding(self, *, vector, properties, model_id="clip"):
+        self.text_upserts.append((vector, properties, model_id))
 
 
 class RegistryTests(unittest.TestCase):
@@ -114,19 +114,19 @@ class DynamicPipelineTests(unittest.TestCase):
         return job
 
     def test_runs_definition_nodes_in_order_and_persists_outputs(self):
-        definition = self._make_definition(["object_detection", "captioning", "embedding"])
+        definition = self._make_definition(["object_detection", "vision_language_model", "embedding"])
         job = self._job_for(definition["_id"])
 
         outputs = {
             "object_detection": {"detections": [{"label": "cat", "confidence": 0.9, "bbox": [1, 2, 3, 4]}]},
-            "captioning": {"caption": "a cat"},
+            "vision_language_model": {"caption": "a cat"},
             "embedding": {"embeddings": [3.0, 4.0], "text_embedding": [0.0, 5.0]},
         }
         self._pipeline(outputs).run_job(job["_id"])
 
         # Nodes ran in declared order.
         self.assertEqual([nt for nt, _ in self.recorder],
-                         ["object_detection", "captioning", "embedding"])
+                         ["object_detection", "vision_language_model", "embedding"])
         # Job completed.
         self.assertEqual(self.r.jobs.get(job["_id"])["status"], "completed")
 
@@ -136,42 +136,71 @@ class DynamicPipelineTests(unittest.TestCase):
         self.assertEqual(by_type["caption"]["payload"], {"text": "a cat"})
         self.assertEqual(by_type["detections"]["payload"]["detections"][0]["label"], "cat")
         # Per-node provenance recorded.
-        self.assertEqual(by_type["caption"]["node_type"], "captioning")
+        self.assertEqual(by_type["caption"]["node_type"], "vision_language_model")
         self.assertEqual(by_type["detections"]["order"], 0)
         # Embeddings are NOT stored as model_outputs.
         self.assertNotIn("embeddings", by_type)
         self.assertNotIn("text_embedding", by_type)
 
     def test_embeddings_are_normalized_and_upserted(self):
-        definition = self._make_definition(["captioning", "embedding"])
+        definition = self._make_definition(["vision_language_model", "embedding"])
         job = self._job_for(definition["_id"])
         outputs = {
-            "captioning": {"caption": "hello"},
+            "vision_language_model": {"caption": "hello"},
             "embedding": {"embeddings": [3.0, 4.0], "text_embedding": [0.0, 2.0]},
         }
         self._pipeline(outputs).run_job(job["_id"])
 
         self.assertEqual(len(self.store.image_upserts), 1)
-        vector, props = self.store.image_upserts[0]
+        vector, props, model_id = self.store.image_upserts[0]
         self.assertAlmostEqual(vector[0], 0.6)
         self.assertAlmostEqual(vector[1], 0.8)
         self.assertEqual(props["pipeline_id"], definition["_id"])
+        # No embedding_model reported by this fake executor's output → the
+        # default model, so old-shaped contexts route to the legacy classes.
+        self.assertEqual(model_id, "clip")
         # Text embedding carries the caption text.
         self.assertEqual(len(self.store.text_upserts), 1)
         self.assertEqual(self.store.text_upserts[0][1]["text"], "hello")
+        self.assertEqual(self.store.text_upserts[0][2], "clip")
+
+    def test_the_embedding_nodes_chosen_model_routes_the_upsert(self):
+        # embedding_model, set by the real EmbeddingExecutor.run(), must reach
+        # WeaviateEmbeddingStore so a non-default model's vectors land in that
+        # model's own class rather than the (differently-dimensioned) default one.
+        definition = self._make_definition(["embedding"])
+        job = self._job_for(definition["_id"])
+        outputs = {
+            "embedding": {
+                "embeddings": [3.0, 4.0],
+                "embedding_model": "clip_vit_l14",
+            },
+        }
+        self._pipeline(outputs).run_job(job["_id"])
+
+        self.assertEqual(self.store.image_upserts[0][2], "clip_vit_l14")
+
+    def test_embedding_model_is_not_persisted_as_a_model_output(self):
+        definition = self._make_definition(["embedding"])
+        job = self._job_for(definition["_id"])
+        outputs = {"embedding": {"embeddings": [1.0], "embedding_model": "clip_vit_l14"}}
+        self._pipeline(outputs).run_job(job["_id"])
+
+        stored = list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]}))
+        self.assertEqual(stored, [])  # only "image"/"embeddings"-family keys skipped here
 
     def test_default_chain_used_when_pipeline_has_no_definition(self):
         # Legacy pipeline id with no stored definition → DEFAULT_PIPELINE_NODES.
         job = self._job_for("default_image_analysis", version="v1")
         outputs = {
             "object_detection": {"detections": []},
-            "captioning": {"caption": "x"},
+            "vision_language_model": {"caption": "x"},
             "embedding": {"embeddings": [1.0]},
         }
         self._pipeline(outputs).run_job(job["_id"])
 
         self.assertEqual([nt for nt, _ in self.recorder],
-                         ["object_detection", "captioning", "embedding"])
+                         ["object_detection", "vision_language_model", "embedding"])
         self.assertEqual(self.r.jobs.get(job["_id"])["status"], "completed")
 
     def test_missing_required_input_fails_job(self):
@@ -231,6 +260,48 @@ class DynamicPipelineTests(unittest.TestCase):
         self.assertEqual(final["attempt_count"], 3)
         self.assertIsNone(final["next_attempt_at"])
         self.assertEqual(final["last_error"]["message"], "transient boom")
+
+    def _run_real_executor_with_failing_model(self, node_type, executor, model_id):
+        """Real executor + a model that dies like the production CUDA failure did."""
+        class CudaDead:
+            def describe(self, *a, **k):
+                raise RuntimeError("CUDA error: out of memory")
+
+            embed = embed_text = describe
+
+        executor._models[model_id] = CudaDead()
+        definition = self._make_definition([node_type])
+        job = self._job_for(definition["_id"])
+        pipeline = PipelineExecutionService(
+            jobs=self.r.jobs, runs=self.r.runs, outputs=self.r.outputs, assets=self.r.assets,
+            pipelines=self.r.pipelines, nodes=self.r.nodes, embedding_store=self.store,
+            get_executor=lambda nt: executor,
+            image_loader=lambda asset: "FAKE_IMAGE",
+        )
+        with self.assertRaises(RuntimeError):
+            pipeline.run_job(job["_id"])
+        return self.r.jobs.get(job["_id"])
+
+    def test_vlm_model_failure_fails_the_job_instead_of_completing_it_empty(self):
+        # Regression: the wrappers used to swallow the error and return None, so the
+        # job logged "completed" with an empty caption and was never retried.
+        from src.services.executors.builtin import VisionLanguageModelExecutor
+
+        job = self._run_real_executor_with_failing_model(
+            "vision_language_model", VisionLanguageModelExecutor(), "blip"
+        )
+        self.assertEqual(job["status"], "queued")  # retryable, not "completed"
+        self.assertEqual(job["attempt_count"], 1)
+        self.assertIn("CUDA error", job["last_error"]["message"])
+        self.assertEqual(list(self.r.outputs.collection.find({"asset_id": self.asset["_id"]})), [])
+
+    def test_embedding_model_failure_fails_the_job_and_stores_no_vector(self):
+        from src.services.executors.builtin import EmbeddingExecutor
+
+        job = self._run_real_executor_with_failing_model("embedding", EmbeddingExecutor(), "clip")
+        self.assertEqual(job["status"], "queued")
+        self.assertIn("CUDA error", job["last_error"]["message"])
+        self.assertEqual(self.store.image_upserts, [])
 
     def test_retryable_failure_emits_queued_not_failed(self):
         # Mirrors test_events.py's old JobLifecycleEventTests coverage of the
@@ -308,9 +379,48 @@ class DynamicPipelineTests(unittest.TestCase):
         self._pipeline({"object_detection": {"detections": []}}).run_job(job["_id"])
 
         _, config = self.recorder[0]
-        # default model from the seeded node + overridden threshold.
-        self.assertEqual(config["model"], "yolov8n")
+        # default confidence from the seeded node + overridden threshold.
+        self.assertEqual(config["confidence"], 0.25)
         self.assertEqual(config["threshold"], 0.9)
+        # No model chosen → no "model" key; the executor falls back to its default.
+        self.assertNotIn("model", config)
+
+    def test_node_model_field_reaches_the_executor_as_config_model(self):
+        nodes = [
+            {
+                "node_id": "n0",
+                "pipeline_node_id": self.node_ids["object_detection"],
+                "order": 0,
+                "config_overrides": {},
+                "model": "yolov8s",
+            }
+        ]
+        definition = self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
+        job = self._job_for(definition["_id"])
+
+        self._pipeline({"object_detection": {"detections": []}}).run_job(job["_id"])
+
+        _, config = self.recorder[0]
+        self.assertEqual(config["model"], "yolov8s")
+
+    def test_a_model_key_in_config_overrides_is_ignored(self):
+        # The old inspector let "model" be typed into the overrides JSON, where no
+        # executor ever read it. Only the node's `model` field selects a model now.
+        nodes = [
+            {
+                "node_id": "n0",
+                "pipeline_node_id": self.node_ids["object_detection"],
+                "order": 0,
+                "config_overrides": {"model": "yolov8m"},
+            }
+        ]
+        definition = self.r.pipelines.create(owner_id="owner-1", name="P", nodes=nodes)
+        job = self._job_for(definition["_id"])
+
+        self._pipeline({"object_detection": {"detections": []}}).run_job(job["_id"])
+
+        _, config = self.recorder[0]
+        self.assertNotIn("model", config)
 
 
 if __name__ == "__main__":

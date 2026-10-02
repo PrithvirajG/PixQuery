@@ -146,14 +146,33 @@ class ProcessingJobsRepositoryTests(unittest.TestCase):
         self.assertEqual(stored["next_attempt_at"], "sentinel-value-not-interpreted")
         self.assertEqual(stored["last_error"]["message"], "boom")
 
-    def test_delete_for_workspace_pipeline_returns_deleted_ids(self):
-        job, _ = self.repo.get_or_create(
+    def test_ids_for_workspace_pipeline_lists_every_version_and_deletes_nothing(self):
+        v1, _ = self.repo.get_or_create(
             asset_id="a1", pipeline_id="p1", pipeline_version="v1", workspace_id="ws1"
         )
-        ids, count = self.repo.delete_for_workspace_pipeline("ws1", "p1")
-        self.assertEqual(ids, [job["_id"]])
-        self.assertEqual(count, 1)
-        self.assertIsNone(self.repo.get(job["_id"]))
+        v2, _ = self.repo.get_or_create(
+            asset_id="a1", pipeline_id="p1", pipeline_version="v2", workspace_id="ws1"
+        )
+        self.repo.get_or_create(  # another pipeline and another workspace: not listed
+            asset_id="a1", pipeline_id="p2", pipeline_version="v1", workspace_id="ws1"
+        )
+        self.repo.get_or_create(
+            asset_id="a1", pipeline_id="p1", pipeline_version="v1", workspace_id="ws2"
+        )
+        self.assertEqual(
+            sorted(self.repo.ids_for_workspace_pipeline("ws1", "p1")), sorted([v1["_id"], v2["_id"]])
+        )
+        self.assertIsNotNone(self.repo.get(v1["_id"]))
+
+    def test_ids_for_asset_pipeline_is_scoped_to_the_pair(self):
+        mine, _ = self.repo.get_or_create(
+            asset_id="a1", pipeline_id="p1", pipeline_version="v1", workspace_id="ws1"
+        )
+        self.repo.get_or_create(
+            asset_id="a2", pipeline_id="p1", pipeline_version="v1", workspace_id="ws1"
+        )
+        self.assertEqual(self.repo.ids_for_asset_pipeline("a1", "p1"), [mine["_id"]])
+        self.assertEqual(self.repo.ids_for_asset_pipeline("a1", "nope"), [])
 
 
 class PipelineRunsRepositoryTests(unittest.TestCase):

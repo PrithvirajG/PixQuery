@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from src.repositories.image_assets_repository import ImageAssetsRepository
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.model_outputs_repository import ModelOutputsRepository
@@ -141,10 +143,34 @@ class ImageService:
         pipelines.sort(key=lambda p: (p["name"] or "").lower())
         return {"pipelines": pipelines}
 
+    def written_image_path(self, asset_id: str, output_id: str) -> Path | None:
+        """On-disk path of one ``written_image`` output, or None.
+
+        The path is read from the stored output row, never from the request —
+        the caller only supplies opaque ids, so there is no way to point this at
+        an arbitrary file. Also checks the output actually belongs to
+        ``asset_id``, so a mismatched pair can't be used to probe other assets'
+        outputs through a URL that looks legitimate.
+        """
+        output = self.outputs.get(output_id)
+        if not output or output.get("asset_id") != asset_id:
+            return None
+        if output.get("output_type") != "written_image":
+            return None
+        written = (output.get("payload") or {}).get("written_image") or {}
+        path = written.get("path")
+        if not path:
+            return None
+        resolved = Path(path)
+        return resolved if resolved.is_file() else None
+
     @staticmethod
     def _output_item(o: dict):
         payload = o.get("payload") or {}
         return {
+            # The row's own id — lets the UI address one specific output (e.g. to
+            # fetch the file a `written_image` stage saved).
+            "id": o.get("_id"),
             "output_type": o.get("output_type"),
             "model_name": o.get("model_name"),
             "model_version": o.get("model_version"),

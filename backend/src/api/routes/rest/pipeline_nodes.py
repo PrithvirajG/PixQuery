@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from src.api.dependencies import get_current_user, get_pipeline_service
+from src.errors.pipelines import PipelineNodeCreationDisabledError
 from src.services import PipelineService
 
 router = APIRouter(prefix="/pipeline-nodes", tags=["pipeline-nodes"])
@@ -42,9 +43,12 @@ async def create_pipeline_node(
     pipeline_service: PipelineService = Depends(get_pipeline_service),
     current_user: dict = Depends(get_current_user),
 ):
-    return pipeline_service.create_pipeline_node(
-        owner_id=current_user["_id"], data=body.model_dump()
-    )
+    try:
+        return pipeline_service.create_pipeline_node(
+            owner_id=current_user["_id"], data=body.model_dump()
+        )
+    except PipelineNodeCreationDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
 
 @router.put("/{node_id}")

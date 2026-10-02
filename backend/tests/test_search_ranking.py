@@ -42,14 +42,30 @@ class ReciprocalRankFusionTests(unittest.TestCase):
         self.assertEqual([d["_id"] for d in fused], ["a", "b", "c"])
 
 
+class _UnencodableQuery:
+    def encode(self, text):
+        return None
+
+
+class _VectorStoreDown:
+    def near_vector(self, *args, **kwargs):
+        raise ConnectionError("vector store unreachable")
+
+
 class SemanticFallbackTests(unittest.TestCase):
-    """When CLIP can't be loaded, semantic search degrades to keyword search."""
+    """When CLIP can't be loaded, semantic search degrades to keyword search.
+
+    Encoder and vector store are injected so this neither loads real CLIP onto
+    the GPU nor depends on whether a real Weaviate happens to be running.
+    """
 
     def setUp(self):
         self.r = new_repos()
         self.search = SearchService(
             assets=self.r.assets, observations=self.r.observations,
             workspaces=self.r.workspaces, outputs=self.r.outputs,
+            vector_store=_VectorStoreDown(),
+            query_encoders={"clip": _UnencodableQuery()},
         )
         asset = self.r.assets.upsert(
             content_sha256="h1",
@@ -67,30 +83,37 @@ class SemanticFallbackTests(unittest.TestCase):
             payload={"text": "a tabby cat"},
         )
 
-    def test_encode_query_returns_none_without_clip(self):
+    def test_query_encoder_returns_none_without_clip(self):
         # Simulate CLIP genuinely being unavailable (e.g. missing torch/clip
         # dependency, or model load failure) rather than relying on it being
         # absent from the test environment -- in this environment CLIP is
-        # installed and loads successfully, so encode_query would otherwise
-        # return a real embedding and this test would be asserting a fact
-        # about the environment, not about the fallback behavior.
+        # installed and loads successfully, so encode() would otherwise return
+        # a real embedding and this test would be asserting a fact about the
+        # environment, not about the fallback behavior. Exercised directly on
+        # ClipQueryEncoder — the real logic, and what SearchService.query_encoders
+        # builds one of per text-capable embedding model — rather than through
+        # SearchService, which is just a thin multi-model fan-out over these.
+        from src.infrastructure.vector_store.query_encoder import ClipQueryEncoder
+
         with mock.patch(
             "src.infrastructure.ml.clip.get_clip_model",
             side_effect=ImportError("CLIP is unavailable"),
         ):
-            self.assertIsNone(self.search._encode_query("cat"))
+            self.assertIsNone(ClipQueryEncoder().encode("cat"))
 
-    def test_encode_query_returns_none_when_embed_text_fails(self):
+    def test_query_encoder_returns_none_when_embed_text_fails(self):
         # embed_text() itself returns None on internal failure (see
-        # ClipModel.embed_text's except branch) -- _encode_query must
-        # propagate that as None too, not raise.
+        # ClipModel.embed_text's except branch) -- encode() must propagate that
+        # as None too, not raise.
+        from src.infrastructure.vector_store.query_encoder import ClipQueryEncoder
+
         fake_model = mock.Mock()
         fake_model.embed_text.return_value = None
         with mock.patch(
             "src.infrastructure.ml.clip.get_clip_model",
             return_value=fake_model,
         ):
-            self.assertIsNone(self.search._encode_query("cat"))
+            self.assertIsNone(ClipQueryEncoder().encode("cat"))
 
     def test_semantic_falls_back_to_keyword(self):
         results = self.search.search(query="tabby", mode="semantic")

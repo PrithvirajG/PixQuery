@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from src.infrastructure.vector_store.protocol import QueryEncoder, VectorSearchClient
+from src.infrastructure.vector_store.weaviate import text_class_name
 from src.logging_config import get_logger
 from src.repositories.file_observations_repository import FileObservationsRepository
 from src.repositories.image_assets_repository import ImageAssetsRepository
@@ -10,25 +11,32 @@ from src.repositories.model_outputs_repository import ModelOutputsRepository
 from src.repositories.workspace_definitions_repository import WorkspaceDefinitionsRepository
 from src.services.access_scope import accessible_asset_ids, workspace_asset_ids
 from src.services.document_serializer import serialize_document
+from src.services.executors.registry import embedding_model_specs
 
 
 SearchMode = Literal["semantic", "keyword", "hybrid"]
 
 _logger = get_logger(__name__)
 
-# Weaviate class holding caption/OCR text vectors — what a text query searches.
-TEXT_EMBEDDING_CLASS = "TextEmbedding"
-
 
 class SearchService:
     """Query routing and result ranking. Knows nothing about Weaviate or CLIP.
 
-    The two external capabilities semantic search needs — embedding the query and
+    The external capabilities semantic search needs — embedding the query and
     finding nearest neighbours — arrive as injected collaborators rather than
     imports reached for mid-method, so the ranking and fusion logic here can be
     exercised against stubs. Both default to the real adapters and are built
     lazily: constructing a ``SearchService`` performs no I/O, and a deployment
     with no vector store still serves keyword search.
+
+    Embedding is multi-model (see ``executors.registry.embedding_model_specs``):
+    a workspace's assets may have been embedded with more than one text-capable
+    model (e.g. CLIP ViT-B/32 and CLIP ViT-L/14, each in its own Weaviate class —
+    see ``weaviate.text_class_name``), so a semantic query is encoded once per
+    such model and every space is queried, merged via the same Reciprocal Rank
+    Fusion hybrid search already uses. A vision-only model with no text tower
+    (DINOv2) never enters this at all — its assets are reachable by keyword/OCR
+    only, the same as an asset with no caption.
     """
 
     def __init__(
@@ -39,14 +47,14 @@ class SearchService:
         workspaces: WorkspaceDefinitionsRepository,
         outputs: ModelOutputsRepository,
         vector_store: VectorSearchClient | None = None,
-        query_encoder: QueryEncoder | None = None,
+        query_encoders: dict[str, QueryEncoder] | None = None,
     ):
         self.assets = assets
         self.observations = observations
         self.workspaces = workspaces
         self.outputs = outputs
         self._vector_store = vector_store
-        self._query_encoder = query_encoder
+        self._query_encoders = query_encoders
 
     @property
     def vector_store(self) -> VectorSearchClient:
@@ -57,12 +65,22 @@ class SearchService:
         return self._vector_store
 
     @property
-    def query_encoder(self) -> QueryEncoder:
-        if self._query_encoder is None:
+    def query_encoders(self) -> dict[str, QueryEncoder]:
+        """One encoder per text-capable embedding model, keyed by model id.
+
+        Built lazily from the Embedding node's own model catalog, so a new
+        text-capable embedding model added there gets a query encoder (and so a
+        Weaviate class to search) with no change here.
+        """
+        if self._query_encoders is None:
             from src.infrastructure.vector_store.query_encoder import ClipQueryEncoder
 
-            self._query_encoder = ClipQueryEncoder()
-        return self._query_encoder
+            self._query_encoders = {
+                spec.id: ClipQueryEncoder(spec.version)
+                for spec in embedding_model_specs()
+                if spec.supports_text
+            }
+        return self._query_encoders
 
     def search(
         self,
@@ -191,59 +209,92 @@ class SearchService:
         threshold: float,
         workspace_id: str | None,
     ) -> list[dict[str, Any]]:
-        vector = self._encode_query(query)
-        if vector is None:
-            # The encoder has already logged *why* it could not encode.
-            _logger.info("Semantic search falling back to keyword: query not encodable")
-            return self._keyword_search(
-                query=query, user_id=user_id,
-                top_k=top_k, skip=skip, workspace_id=workspace_id,
-            )
-
-        try:
-            hits = self.vector_store.near_vector(
-                class_name=TEXT_EMBEDDING_CLASS,
-                vector=vector,
-                top_k=top_k + skip,
-                certainty=threshold or 0.0,
-            )
-        except Exception:
-            # A misconfigured or unreachable vector store must not take search
-            # down, but it is an operational fault and looks nothing like "CLIP
-            # isn't installed" — log it loudly enough to tell the two apart.
-            _logger.warning(
-                "Vector store query failed; falling back to keyword search",
-                exc_info=True,
+        encoders = self.query_encoders
+        if not encoders:
+            _logger.info(
+                "Semantic search falling back to keyword: no text-capable "
+                "embedding model is configured"
             )
             return self._keyword_search(
                 query=query, user_id=user_id,
                 top_k=top_k, skip=skip, workspace_id=workspace_id,
             )
 
-        # hits → [{asset_id, certainty}]
-        hits = hits[skip:]
         captions = self._captions_map()
         allowed_ids = self._allowed_asset_ids(user_id=user_id, workspace_id=workspace_id)
 
-        results: list[dict[str, Any]] = []
-        for hit in hits:
-            asset_id = hit.get("asset_id")
-            if allowed_ids is not None and asset_id not in allowed_ids:
-                continue
-            asset = self.assets.get(asset_id)
-            if not asset or not asset.get("active"):
-                continue
-            certainty = hit.get("certainty", 0.0)
-            results.append({
-                **serialize_document(asset),
-                "description": captions.get(asset_id, ""),
-                "score": certainty,
-                "match_reason": {"mode": "semantic", "similarity": round(certainty, 3)},
-            })
-            if len(results) >= top_k:
-                break
+        # One ranked list per text-capable embedding model whose space we could
+        # both encode the query into AND successfully query — fused below via the
+        # same RRF hybrid search uses, so no single model's certainty scale (they
+        # aren't comparable across models) ever dominates.
+        per_model_results: list[list[dict[str, Any]]] = []
+        encoded_any = False
+        queried_any = False
+        for model_id, encoder in encoders.items():
+            vector = encoder.encode(query)
+            if vector is None:
+                continue  # the encoder already logged why
+            encoded_any = True
 
-        return results
+            try:
+                hits = self.vector_store.near_vector(
+                    class_name=text_class_name(model_id),
+                    vector=vector,
+                    top_k=top_k + skip,
+                    certainty=threshold or 0.0,
+                )
+            except Exception:
+                # A misconfigured or unreachable vector store must not take search
+                # down, but it is an operational fault and looks nothing like
+                # "CLIP isn't installed" — log it loudly enough to tell apart.
+                _logger.warning(
+                    "Vector store query failed for embedding model '%s'; "
+                    "skipping that embedding space", model_id, exc_info=True,
+                )
+                continue
+            queried_any = True
+
+            model_results: list[dict[str, Any]] = []
+            for hit in hits:
+                asset_id = hit.get("asset_id")
+                if allowed_ids is not None and asset_id not in allowed_ids:
+                    continue
+                asset = self.assets.get(asset_id)
+                if not asset or not asset.get("active"):
+                    continue
+                certainty = hit.get("certainty", 0.0)
+                model_results.append({
+                    **serialize_document(asset),
+                    "description": captions.get(asset_id, ""),
+                    "score": certainty,
+                    "match_reason": {"mode": "semantic", "similarity": round(certainty, 3)},
+                })
+            per_model_results.append(model_results)
+
+        if not encoded_any:
+            _logger.info(
+                "Semantic search falling back to keyword: query not encodable "
+                "in any embedding space"
+            )
+            return self._keyword_search(
+                query=query, user_id=user_id,
+                top_k=top_k, skip=skip, workspace_id=workspace_id,
+            )
+        if not queried_any:
+            _logger.warning(
+                "Vector store query failed in every embedding space; "
+                "falling back to keyword search"
+            )
+            return self._keyword_search(
+                query=query, user_id=user_id,
+                top_k=top_k, skip=skip, workspace_id=workspace_id,
+            )
+
+        merged = (
+            per_model_results[0] if len(per_model_results) == 1
+            else _reciprocal_rank_fusion(per_model_results)
+        )
+        return merged[skip: skip + top_k]
 
     # ──────────────────────────────────────────────────────────────
     # Hybrid search
@@ -344,14 +395,6 @@ class SearchService:
             output["asset_id"]: output.get("payload", {}).get("text", "")
             for output in self.outputs.list_by_type(output_type)
         }
-
-    def _encode_query(self, query: str) -> list[float] | None:
-        """Encode a text query into the stored embeddings' vector space.
-
-        Returns None when encoding is unavailable, which is the signal callers use
-        to degrade to keyword search. The encoder itself logs the reason.
-        """
-        return self.query_encoder.encode(query)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

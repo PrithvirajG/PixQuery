@@ -9,7 +9,6 @@ from src.utils.files import sha256_file, wait_for_stable_file
 
 if TYPE_CHECKING:
     from src.consumer.ingestion.filesystem_watcher import ImageEventHandler, WorkspaceWatcher
-    from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
     from src.consumer.ingestion.worker import start_file_watcher
 
 __all__ = [
@@ -17,7 +16,6 @@ __all__ = [
     "ImageEventHandler",
     "Publisher",
     "ReconciliationService",
-    "ScanCommandConsumer",
     "WorkspaceWatcher",
     "pipeline_version_hash",
     "sha256_file",
@@ -35,10 +33,6 @@ def __getattr__(name):
         from src.consumer.ingestion.filesystem_watcher import WorkspaceWatcher
 
         return WorkspaceWatcher
-    if name == "ScanCommandConsumer":
-        from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
-
-        return ScanCommandConsumer
     if name == "start_file_watcher":
         from src.consumer.ingestion.worker import start_file_watcher
 

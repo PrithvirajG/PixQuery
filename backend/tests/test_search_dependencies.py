@@ -100,7 +100,10 @@ class SemanticSearchTests(unittest.TestCase):
         return asset
 
     def _service(self, store, encoder):
-        return _search_service(self.r, vector_store=store, query_encoder=encoder)
+        # A single-entry dict keyed "clip" exercises exactly one embedding space
+        # (the legacy, unsuffixed "TextEmbedding" class) — multi-model fan-out
+        # across several spaces is covered separately, in MultiModelSemanticSearchTests.
+        return _search_service(self.r, vector_store=store, query_encoders={"clip": encoder})
 
     def test_semantic_hits_are_resolved_into_assets(self):
         store = StubVectorStore([VectorHit(asset_id=self.asset["_id"], certainty=0.91)])
@@ -239,7 +242,7 @@ class WorkspaceScopingTests(unittest.TestCase):
     def test_semantic_hits_in_another_users_workspace_are_dropped(self):
         store = StubVectorStore([VectorHit(asset_id=self.bob_asset, certainty=0.99)])
         service = _search_service(
-            self.r, vector_store=store, query_encoder=StubEncoder([0.1])
+            self.r, vector_store=store, query_encoders={"clip": StubEncoder([0.1])}
         )
         results = service.search(
             query="private",
@@ -260,6 +263,141 @@ class WorkspaceScopingTests(unittest.TestCase):
             query="", user_id=self.bob["_id"], workspace_id="does-not-exist"
         )
         self.assertEqual(results, [])
+
+
+class MultiModelSemanticSearchTests(unittest.TestCase):
+    """Fan-out across several text-capable embedding models' Weaviate spaces.
+
+    Each embedding model's vectors live in their own class (see
+    weaviate.text_class_name); a semantic query is encoded once per model and
+    every space queried, then merged. These stub two models directly (rather
+    than reading the real Embedding node catalog) so the fan-out/merge/degrade
+    logic is pinned independently of which models happen to be registered.
+    """
+
+    def setUp(self):
+        self.r = new_repos()
+        self.user = self.r.users.create("alice", "hash")
+        self.workspace = self.r.workspaces.create(
+            owner_id=self.user["_id"], name="ws", workspace_path="/photos"
+        )
+        self.cat = self._add_asset("h1", "/photos/cat.jpg", "a tabby cat")
+        self.dog = self._add_asset("h2", "/photos/dog.jpg", "a happy dog")
+
+    def _add_asset(self, sha, path, caption):
+        asset = self.r.assets.upsert(
+            content_sha256=sha, mime_type="image/jpeg", size_bytes=5,
+            current_path=path, workspace_id=self.workspace["_id"],
+        )
+        self.r.observations.upsert(
+            asset_id=asset["_id"], workspace_id=self.workspace["_id"],
+            relative_path=path.rsplit("/", 1)[-1], absolute_path=path,
+            content_sha256=sha,
+        )
+        self.r.outputs.add(
+            asset_id=asset["_id"], pipeline_run_id=f"run-{sha}",
+            model_name="blip", model_version="base", output_type="caption",
+            payload={"text": caption},
+        )
+        return asset
+
+    def _service(self, store, encoders):
+        return _search_service(self.r, vector_store=store, query_encoders=encoders)
+
+    def test_queries_every_text_capable_models_class(self):
+        store = StubVectorStore([])
+        service = self._service(
+            store,
+            {"clip": StubEncoder([0.1]), "clip_vit_l14": StubEncoder([0.2, 0.3])},
+        )
+
+        service.search(query="cat", user_id=self.user["_id"], mode="semantic", top_k=5)
+
+        classes_queried = {c["class_name"] for c in store.calls}
+        self.assertEqual(classes_queried, {"TextEmbedding", "TextEmbeddingClipVitL14"})
+        vectors_by_class = {c["class_name"]: c["vector"] for c in store.calls}
+        self.assertEqual(vectors_by_class["TextEmbedding"], [0.1])
+        self.assertEqual(vectors_by_class["TextEmbeddingClipVitL14"], [0.2, 0.3])
+
+    def test_hits_from_both_spaces_are_merged(self):
+        store = _PerClassVectorStore({
+            "TextEmbedding": [VectorHit(asset_id=self.cat["_id"], certainty=0.9)],
+            "TextEmbeddingClipVitL14": [VectorHit(asset_id=self.dog["_id"], certainty=0.95)],
+        })
+        service = self._service(
+            store, {"clip": StubEncoder([0.1]), "clip_vit_l14": StubEncoder([0.2])}
+        )
+
+        results = service.search(query="pet", user_id=self.user["_id"], mode="semantic", top_k=10)
+
+        self.assertEqual({r["_id"] for r in results}, {self.cat["_id"], self.dog["_id"]})
+
+    def test_one_model_failing_to_encode_does_not_block_the_other(self):
+        store = _PerClassVectorStore({
+            "TextEmbeddingClipVitL14": [VectorHit(asset_id=self.dog["_id"], certainty=0.9)],
+        })
+        service = self._service(
+            store, {"clip": StubEncoder(None), "clip_vit_l14": StubEncoder([0.2])}
+        )
+
+        results = service.search(query="dog", user_id=self.user["_id"], mode="semantic", top_k=10)
+
+        self.assertEqual([r["_id"] for r in results], [self.dog["_id"]])
+        self.assertEqual({c["class_name"] for c in store.calls}, {"TextEmbeddingClipVitL14"})
+
+    def test_one_model_failing_to_query_does_not_block_the_other(self):
+        store = _PerClassVectorStore({
+            "TextEmbedding": [VectorHit(asset_id=self.cat["_id"], certainty=0.9)],
+        }, error_for={"TextEmbeddingClipVitL14"})
+        service = self._service(
+            store, {"clip": StubEncoder([0.1]), "clip_vit_l14": StubEncoder([0.2])}
+        )
+
+        with self.assertLogs("pixquery.services.search_service", level=logging.WARNING):
+            results = service.search(query="cat", user_id=self.user["_id"], mode="semantic", top_k=10)
+
+        self.assertEqual([r["_id"] for r in results], [self.cat["_id"]])
+
+    def test_every_model_failing_to_query_degrades_to_keyword(self):
+        store = _PerClassVectorStore({}, error_for={"TextEmbedding", "TextEmbeddingClipVitL14"})
+        service = self._service(
+            store, {"clip": StubEncoder([0.1]), "clip_vit_l14": StubEncoder([0.2])}
+        )
+
+        results = service.search(query="cat", user_id=self.user["_id"], mode="semantic", top_k=10)
+
+        self.assertEqual([r["_id"] for r in results], [self.cat["_id"]])  # via keyword, not semantic
+        self.assertEqual(results[0]["match_reason"]["mode"], "keyword")
+
+    def test_no_text_capable_model_configured_degrades_to_keyword(self):
+        service = self._service(StubVectorStore([]), {})
+
+        with self.assertLogs("pixquery.services.search_service", level=logging.INFO):
+            results = service.search(query="cat", user_id=self.user["_id"], mode="semantic", top_k=10)
+
+        self.assertEqual([r["_id"] for r in results], [self.cat["_id"]])
+        self.assertEqual(results[0]["match_reason"]["mode"], "keyword")
+
+    def test_default_query_encoders_cover_every_text_capable_model(self):
+        # Built from the real Embedding node catalog — DINOv2 (no text tower)
+        # must be excluded automatically.
+        service = _search_service(self.r)
+        self.assertEqual(set(service.query_encoders), {"clip", "clip_vit_l14"})
+
+
+class _PerClassVectorStore:
+    """Routes near_vector by class_name to canned hits, or raises for a chosen set."""
+
+    def __init__(self, hits_by_class, *, error_for: set[str] = frozenset()):
+        self.hits_by_class = hits_by_class
+        self.error_for = error_for
+        self.calls: list[dict] = []
+
+    def near_vector(self, *, class_name, vector, top_k, certainty=0.0):
+        self.calls.append({"class_name": class_name, "vector": vector, "top_k": top_k, "certainty": certainty})
+        if class_name in self.error_for:
+            raise ConnectionError(f"weaviate unreachable for {class_name}")
+        return self.hits_by_class.get(class_name, [])
 
 
 if __name__ == "__main__":

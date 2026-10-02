@@ -1,17 +1,19 @@
 """on_message behaviour of the two work-queue consumers.
 
-ImageProcessorConsumer.__init__ opens a real Mongo connection, so instances are
+Both consumers' __init__ open a real Mongo connection, so instances are
 built with __new__ and given only the attributes on_message reads.
 """
 import asyncio
 import contextlib
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
-from src.consumer.ingestion.scan_command_consumer import ScanCommandConsumer
+from src.consumer.processing.file_observation_consumer import FileObservationConsumer
 from src.consumer.processing.image_task_consumer import ImageProcessorConsumer
+from src.errors.files import FileNotStableError
 from src.logging_config import get_logger, get_request_id
 
 
@@ -56,7 +58,16 @@ def image_consumer(pipeline, job=None):
     c.pipeline = pipeline
     c.jobs = FakeJobs(job)
     c.queue_name = "image_task"
+    c.fatal = asyncio.Event()
     return c
+
+
+class AcceleratorError(RuntimeError):
+    """Same class name as torch.AcceleratorError, which the classifier matches on."""
+
+
+class OutOfMemoryError(RuntimeError):
+    """Same class name as torch.cuda.OutOfMemoryError."""
 
 
 class ImageProcessorConsumerTests(unittest.TestCase):
@@ -84,6 +95,48 @@ class ImageProcessorConsumerTests(unittest.TestCase):
         consumer._republish_after_backoff = mock.AsyncMock()
         asyncio.run(consumer.on_message(FakeMessage("job-1")))
         consumer._republish_after_backoff.assert_not_called()
+
+    def test_fatal_cuda_error_requeues_immediately_and_stops_the_worker(self):
+        error = AcceleratorError("CUDA error: out of memory")
+        consumer = image_consumer(RecordingPipeline(error), job={"status": "queued", "next_attempt_at": None})
+        consumer._republish_after_backoff = mock.AsyncMock()
+        with mock.patch("src.consumer.processing.image_task_consumer.residency") as residency:
+            asyncio.run(consumer.on_message(FakeMessage("job-1")))
+        consumer._republish_after_backoff.assert_awaited_once_with("job-1", None)
+        self.assertTrue(consumer.fatal.is_set())
+        residency.park_all.assert_not_called()  # a broken context can't be cleaned up in-process
+
+    def test_fatal_cuda_error_on_a_permanently_failed_job_still_stops_without_requeue(self):
+        consumer = image_consumer(RecordingPipeline(AcceleratorError("CUDA error: x")), job={"status": "failed"})
+        consumer._republish_after_backoff = mock.AsyncMock()
+        asyncio.run(consumer.on_message(FakeMessage("job-1")))
+        consumer._republish_after_backoff.assert_not_called()
+        self.assertTrue(consumer.fatal.is_set())
+
+    def test_recoverable_oom_parks_models_and_retries_with_backoff(self):
+        when = datetime.now(timezone.utc) + timedelta(seconds=30)
+        consumer = image_consumer(
+            RecordingPipeline(OutOfMemoryError("CUDA out of memory. Tried to allocate 20 MiB")),
+            job={"status": "queued", "next_attempt_at": when},
+        )
+        consumer._republish_after_backoff = mock.AsyncMock()
+
+        async def go():
+            await consumer.on_message(FakeMessage("job-1"))
+            await asyncio.sleep(0)
+
+        with mock.patch("src.consumer.processing.image_task_consumer.residency") as residency:
+            asyncio.run(go())
+        residency.park_all.assert_called_once()
+        consumer._republish_after_backoff.assert_awaited_once_with("job-1", when)
+        self.assertFalse(consumer.fatal.is_set())
+
+    def test_ordinary_failure_neither_parks_models_nor_stops_the_worker(self):
+        consumer = image_consumer(RecordingPipeline(RuntimeError("boom")), job={"status": "failed"})
+        with mock.patch("src.consumer.processing.image_task_consumer.residency") as residency:
+            asyncio.run(consumer.on_message(FakeMessage("job-1")))
+        residency.park_all.assert_not_called()
+        self.assertFalse(consumer.fatal.is_set())
 
     def _republish(self, next_attempt_at):
         consumer = image_consumer(RecordingPipeline())
@@ -117,17 +170,85 @@ class ImageProcessorConsumerTests(unittest.TestCase):
         sleep.assert_not_called()
 
 
-class ScanCommandConsumerTests(unittest.TestCase):
-    def test_manual_scan_redispatches_failed_jobs_under_the_request_id(self):
-        seen = []
+class FakeWorkspaces:
+    def __init__(self, workspace=None):
+        self.workspace = workspace
 
-        class Watcher:
-            async def reconcile_workspace(self, workspace_id, *, redispatch_failed=False):
-                seen.append((workspace_id, redispatch_failed, get_request_id()))
+    def get(self, workspace_id):
+        return self.workspace
 
-        consumer = ScanCommandConsumer(Watcher(), queue_name="scan", rabbitmq_url="amqp://x")
-        asyncio.run(consumer.on_message(FakeMessage(" ws-1 ", correlation_id="trace-scan")))
-        self.assertEqual(seen, [("ws-1", True, "trace-scan")])
+
+class RecordingReconciler:
+    def __init__(self, error=None, queued=("job-1",)):
+        self.error = error
+        self.queued = list(queued)
+        self.calls = []
+
+    async def observe_file(self, path, *, redispatch_failed=False):
+        self.calls.append((path, redispatch_failed, get_request_id()))
+        if self.error:
+            raise self.error
+        return self.queued
+
+
+def file_observation_consumer(workspace=None):
+    c = FileObservationConsumer.__new__(FileObservationConsumer)
+    c.logger = get_logger("tests.file_observation_consumer")
+    c.workspaces = FakeWorkspaces(workspace)
+    c.assets = c.observations = c.jobs = c.pipelines = None
+    c.image_task_publisher = None
+    c.event_sink = None
+    c.queue_name = "file_observations"
+    return c
+
+
+_WORKSPACE = {"_id": "ws-1", "workspace_path": "/w", "pipeline_ids": ["p1"], "extensions": [".jpg"]}
+
+
+class FileObservationConsumerTests(unittest.TestCase):
+    def _patched(self, workspace=_WORKSPACE, **reconciler_kwargs):
+        reconciler = RecordingReconciler(**reconciler_kwargs)
+        patcher = mock.patch(
+            "src.consumer.processing.file_observation_consumer.ReconciliationService",
+            return_value=reconciler,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return file_observation_consumer(workspace), reconciler
+
+    def test_observes_the_file_under_the_message_correlation_id(self):
+        consumer, reconciler = self._patched()
+        msg = FakeMessage(
+            json.dumps({"workspace_id": "ws-1", "path": "/w/a.jpg", "redispatch_failed": True}),
+            correlation_id="trace-7",
+        )
+        asyncio.run(consumer.on_message(msg))
+        self.assertEqual(reconciler.calls, [("/w/a.jpg", True, "trace-7")])
+
+    def test_redispatch_failed_defaults_to_false(self):
+        consumer, reconciler = self._patched()
+        msg = FakeMessage(json.dumps({"workspace_id": "ws-1", "path": "/w/a.jpg"}))
+        asyncio.run(consumer.on_message(msg))
+        self.assertEqual(reconciler.calls[0][1], False)
+
+    def test_unknown_workspace_is_dropped_without_building_a_reconciler(self):
+        with mock.patch(
+            "src.consumer.processing.file_observation_consumer.ReconciliationService"
+        ) as rs:
+            consumer = file_observation_consumer(workspace=None)
+            msg = FakeMessage(json.dumps({"workspace_id": "ws-x", "path": "/w/a.jpg"}))
+            asyncio.run(consumer.on_message(msg))
+            rs.assert_not_called()
+
+    def test_unstable_file_is_postponed_without_raising(self):
+        consumer, _ = self._patched(error=FileNotStableError("still copying"))
+        msg = FakeMessage(json.dumps({"workspace_id": "ws-1", "path": "/w/a.jpg"}))
+        asyncio.run(consumer.on_message(msg))  # must not raise
+
+    def test_other_errors_are_swallowed(self):
+        consumer, _ = self._patched(error=RuntimeError("boom"))
+        msg = FakeMessage(json.dumps({"workspace_id": "ws-1", "path": "/w/a.jpg"}))
+        asyncio.run(consumer.on_message(msg))  # must not raise
 
 
 if __name__ == "__main__":

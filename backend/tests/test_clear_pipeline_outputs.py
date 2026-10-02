@@ -25,7 +25,7 @@ class ClearPipelineOutputsPermissionTests(unittest.TestCase):
 
     def test_owner_can_clear(self):
         result = self.service.clear_pipeline_outputs(self.ws["_id"], "p1", owner_id="owner-1")
-        self.assertEqual(result, {"outputs_deleted": 0, "runs_deleted": 0, "jobs_deleted": 0})
+        self.assertEqual(result, {"outputs_deleted": 0, "runs_deleted": 0})
 
     def test_viewer_denied(self):
         self.r.workspaces.update(

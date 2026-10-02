@@ -22,8 +22,8 @@ consumer's ``on_message`` reading the incoming AMQP message's
 however many services and repositories it passes through, carry the same id.
 Publishing a message with ``correlation_id=get_request_id()`` (the default in
 ``RabbitPublisher.publish``) is what carries the id across the process
-boundary, so one workspace scan is traceable end-to-end: API → scan_commands
-→ file-watcher → image_task → pipeline-worker.
+boundary, so one workspace scan is traceable end-to-end: API → file_observations
+→ image_task → pipeline-worker.
 """
 from __future__ import annotations
 

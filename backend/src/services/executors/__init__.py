@@ -10,13 +10,22 @@ only when they actually run.
 """
 
 from src.errors.executors import NodeExecutionError, PermanentNodeError
-from src.services.executors.base import BaseNodeExecutor, NodeExecutor
-from src.services.executors.registry import get_executor
+from src.services.executors.base import BaseNodeExecutor, ModelSpec, NodeExecutor
+from src.services.executors.registry import (
+    describe_node_type,
+    embedding_model_specs,
+    get_executor,
+    supported_model_ids,
+)
 
 __all__ = [
     "BaseNodeExecutor",
+    "ModelSpec",
     "NodeExecutionError",
     "NodeExecutor",
     "PermanentNodeError",
+    "describe_node_type",
+    "embedding_model_specs",
     "get_executor",
+    "supported_model_ids",
 ]

@@ -2,7 +2,6 @@
 // Left: pipeline list rail. Center: vertical stage editor. Right: node inspector
 // with the shared-pipeline warning (a pipeline can be attached to many workspaces).
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { useLocation } from 'react-router-dom';
 import { errorMessage } from '../lib/apiError';
@@ -22,34 +21,43 @@ import {
 } from '../aperture/kit';
 import PipelineGraphCanvas from '../components/PipelineGraphCanvas';
 
-const NODE_TYPES = [
-  'object_detection',
-  'captioning',
-  'embedding',
-  'ocr',
-  'resize',
-  'grayscale',
-  'image_write',
-  'classification',
-  'face_detection',
-];
-
 const KIND_STYLE = {
   model: { c: AP.lumenSoft, bg: AP.lumenBg2, line: AP.lumenLine, icon: '✦' },
   proc: { c: AP.ink, bg: AP.cardHi, line: AP.line2, icon: '◧' },
   io: { c: AP.ink2, bg: AP.card, line: AP.line2, icon: '▢' },
 };
 
-// classify a node type for styling: model nodes glow Lumen
-function kindOf(nodeType) {
-  if (['object_detection', 'captioning', 'embedding', 'ocr', 'classification', 'face_detection'].includes(nodeType))
-    return 'model';
-  if (['resize', 'grayscale', 'image_write'].includes(nodeType)) return 'proc';
+// classify a node-library entry for styling: model nodes glow Lumen. `kind` comes
+// from the backend (the node's executor), so a new node type styles itself.
+function kindOf(nodeDef) {
+  if (nodeDef?.kind === 'model') return 'model';
+  if (nodeDef?.kind === 'transform') return 'proc';
   return 'io';
 }
 
-function styleForType(nodeType) {
-  return KIND_STYLE[kindOf(nodeType)];
+// read-only inspector field: plain text with a lock, per the Node Inspector design
+function LockedField({ label, value }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <Eyebrow>{label}</Eyebrow>
+      <div
+        title="Read-only"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '2px 0',
+          fontFamily: AP.mono,
+          fontSize: 12.5,
+          color: AP.ink2,
+          wordBreak: 'break-word',
+        }}
+      >
+        <span style={{ fontSize: 10, color: AP.ink4 }}>🔒︎</span>
+        {value}
+      </div>
+    </div>
+  );
 }
 
 function shortId(id) {
@@ -67,6 +75,7 @@ function toGraph(p) {
     node_id: n.node_id || uid(),
     pipeline_node_id: n.pipeline_node_id,
     config_overrides: n.config_overrides ?? {},
+    model: n.model ?? null,
     position: n.position && typeof n.position.x === 'number' ? n.position : { x: 60, y: 40 + i * 96 },
   }));
   let edges = (p.edges ?? []).map((e) => ({
@@ -125,143 +134,6 @@ function WsChip({ name }) {
   );
 }
 
-/* ── new node modal ───────────────────────────────────────────── */
-function NewNodeModal({ onCreate, onClose }) {
-  const [form, setForm] = useState({
-    name: '',
-    description: '',
-    node_type: NODE_TYPES[0],
-    context_inputs: 'image',
-    context_outputs: '',
-    default_config: '{}',
-  });
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    if (!form.name.trim()) {
-      setError('Name is required');
-      return;
-    }
-    let cfg;
-    try {
-      cfg = JSON.parse(form.default_config || '{}');
-    } catch {
-      setError('Default config must be valid JSON');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      await onCreate({
-        name: form.name.trim(),
-        description: form.description.trim(),
-        node_type: form.node_type,
-        context_inputs: form.context_inputs.split(',').map((s) => s.trim()).filter(Boolean),
-        context_outputs: form.context_outputs.split(',').map((s) => s.trim()).filter(Boolean),
-        config_schema: {},
-        default_config: cfg,
-      });
-      onClose();
-    } catch (err) {
-      setError(errorMessage(err, 'Create failed'));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const label = { fontFamily: AP.mono, fontSize: 10.5, letterSpacing: '.09em', textTransform: 'uppercase', color: AP.ink3 };
-
-  return createPortal(
-    <div
-      className="ap-screen"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9999,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-      }}
-    >
-      <div style={{ position: 'absolute', inset: 0, background: 'rgba(3,4,8,0.7)', backdropFilter: 'blur(4px)' }} onClick={onClose} />
-      <div
-        style={{
-          position: 'relative',
-          width: '100%',
-          maxWidth: 460,
-          background: AP.panel,
-          border: `1px solid ${AP.line2}`,
-          borderRadius: 16,
-          padding: 20,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 14,
-          boxShadow: '0 24px 60px rgba(0,0,0,.6)',
-        }}
-      >
-        <div style={{ fontFamily: AP.sans, fontSize: 15, fontWeight: 600, color: AP.ink }}>New library node</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span style={label}>Name</span>
-          <ApInput autoFocus value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="objects-precise" />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span style={label}>Stage type</span>
-          <ApSelect value={form.node_type} onChange={(e) => setForm((f) => ({ ...f, node_type: e.target.value }))}>
-            {NODE_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </ApSelect>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span style={label}>Description</span>
-          <ApInput value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="optional" />
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={label}>Inputs (csv)</span>
-            <ApInput value={form.context_inputs} onChange={(e) => setForm((f) => ({ ...f, context_inputs: e.target.value }))} style={{ fontFamily: AP.mono, fontSize: 12 }} />
-          </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={label}>Outputs (csv)</span>
-            <ApInput value={form.context_outputs} onChange={(e) => setForm((f) => ({ ...f, context_outputs: e.target.value }))} style={{ fontFamily: AP.mono, fontSize: 12 }} />
-          </div>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span style={label}>Default config (JSON)</span>
-          <textarea
-            value={form.default_config}
-            onChange={(e) => setForm((f) => ({ ...f, default_config: e.target.value }))}
-            rows={4}
-            style={{
-              fontFamily: AP.mono,
-              fontSize: 12,
-              color: AP.ink,
-              background: AP.card,
-              border: `1px solid ${AP.line2}`,
-              borderRadius: 9,
-              padding: '9px 11px',
-              outline: 'none',
-              resize: 'vertical',
-            }}
-          />
-        </div>
-        {error && <span style={{ fontFamily: AP.sans, fontSize: 12, color: STATUS.err.c }}>{error}</span>}
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <GhostBtn onClick={onClose}>Cancel</GhostBtn>
-          <LumenBtn onClick={submit} disabled={busy}>
-            {busy ? 'Creating…' : 'Create node'}
-          </LumenBtn>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
 /* ── main view ────────────────────────────────────────────────── */
 
 function ModelManagementView() {
@@ -274,7 +146,6 @@ function ModelManagementView() {
   const [dirty, setDirty] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
-  const [showNewNode, setShowNewNode] = useState(false);
   const [creatingNew, setCreatingNew] = useState(false);
   const [newName, setNewName] = useState('');
   const [saving, setSaving] = useState(false);
@@ -387,7 +258,7 @@ function ModelManagementView() {
       const copyNodes = nodes.map((n) => {
         const nid = uid();
         idMap[n.node_id] = nid;
-        return { node_id: nid, pipeline_node_id: n.pipeline_node_id, config_overrides: n.config_overrides, position: n.position };
+        return { node_id: nid, pipeline_node_id: n.pipeline_node_id, config_overrides: n.config_overrides, model: n.model, position: n.position };
       });
       const copyEdges = edges.map((e) => ({
         from_node_id: idMap[e.from_node_id], to_node_id: idMap[e.to_node_id],
@@ -433,7 +304,12 @@ function ModelManagementView() {
         : { x: 60, y: 40 };
       return {
         ...ep,
-        nodes: [...ep.nodes, { node_id: newId, pipeline_node_id: nodeDef._id, config_overrides: {}, position }],
+        // Pin the default model explicitly, so a later change of the backend's
+        // default doesn't silently change what this pipeline runs.
+        nodes: [...ep.nodes, {
+          node_id: newId, pipeline_node_id: nodeDef._id, config_overrides: {},
+          model: nodeDef.default_model ?? null, position,
+        }],
       };
     });
     setShowPalette(false);
@@ -491,10 +367,34 @@ function ModelManagementView() {
     }));
   };
 
-  const handleCreateNode = async (payload) => {
-    await axios.post(`${API}/pipeline-nodes`, payload);
-    await loadData();
+  const setStageModel = (model) => {
+    mutate((ep) => ({
+      ...ep,
+      nodes: ep.nodes.map((n) => (n.node_id === selectedNodeId ? { ...n, model } : n)),
+    }));
   };
+
+  // Prompt is config, not a top-level node field like model — but for a
+  // prompt-capable node (Vision Language Model's Qwen2-VL/Moondream2; BLIP has
+  // no prompt support, see supports_prompt) it's the one setting that matters,
+  // so it gets its own field instead of living only in the raw config JSON. It
+  // writes into the same config_overrides the JSON editor reads/writes, so
+  // either one stays in sync with the other.
+  const setStagePrompt = (prompt) => {
+    mutate((ep) => ({
+      ...ep,
+      nodes: ep.nodes.map((n) =>
+        n.node_id === selectedNodeId
+          ? { ...n, config_overrides: { ...(n.config_overrides ?? {}), prompt } }
+          : n
+      ),
+    }));
+  };
+
+  const styleForType = useCallback(
+    (nodeType) => KIND_STYLE[kindOf(nodeLibrary.find((d) => d.node_type === nodeType))],
+    [nodeLibrary]
+  );
 
   const handleDeleteNode = async (id) => {
     if (!window.confirm('Delete this custom node from the library?')) return;
@@ -524,7 +424,6 @@ function ModelManagementView() {
             <GhostBtn onClick={() => selected && handleDuplicate(selected)} disabled={!selected}>
               ⧉ Duplicate
             </GhostBtn>
-            <GhostBtn onClick={() => setShowNewNode(true)}>+ New node</GhostBtn>
             {dirty ? (
               <LumenBtn onClick={handleSave} disabled={saving}>
                 {saving ? 'Saving…' : '✓ Save pipeline'}
@@ -762,7 +661,7 @@ function ModelManagementView() {
                       className="ap-scroll"
                     >
                       {nodeLibrary.map((d) => {
-                        const k = KIND_STYLE[kindOf(d.node_type)];
+                        const k = KIND_STYLE[kindOf(d)];
                         const custom = d.owner_id !== 'system';
                         return (
                           <div
@@ -930,30 +829,81 @@ function ModelManagementView() {
                 </div>
               )}
 
-              {[
-                ['Node name', stageDef.name],
-                ['Stage type', stageDef.node_type],
-                ['Inputs', (stageDef.context_inputs ?? []).join(', ') || '—'],
-                ['Outputs', (stageDef.context_outputs ?? []).join(', ') || '—'],
-              ].map(([l, v]) => (
-                <div key={l} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <Eyebrow>{l}</Eyebrow>
-                  <div
-                    style={{
-                      padding: '9px 11px',
-                      borderRadius: 9,
-                      background: AP.card,
-                      border: `1px solid ${AP.line2}`,
-                      fontFamily: AP.mono,
-                      fontSize: 12.5,
-                      color: AP.ink,
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {v}
-                  </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Eyebrow>Node name</Eyebrow>
+                <div
+                  style={{
+                    padding: '9px 11px',
+                    borderRadius: 9,
+                    background: AP.card,
+                    border: `1px solid ${AP.line2}`,
+                    fontFamily: AP.mono,
+                    fontSize: 12.5,
+                    color: AP.ink,
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {stageDef.name}
                 </div>
-              ))}
+              </div>
+
+              {/* set by the stage type (the backend executor), so not editable */}
+              <LockedField label="Stage type" value={stageDef.node_type} />
+              {stageDef.executor && <LockedField label="Executor" value={stageDef.executor} />}
+              <LockedField label="Inputs" value={(stageDef.context_inputs ?? []).join(', ') || '—'} />
+              <LockedField
+                label="Outputs"
+                value={stageDef.outputs_label || (stageDef.context_outputs ?? []).join(', ') || '—'}
+              />
+
+              {(stageDef.models ?? []).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <Eyebrow>Model</Eyebrow>
+                  <ApSelect
+                    aria-label="Model"
+                    value={stage.model ?? stageDef.default_model ?? ''}
+                    onChange={(e) => setStageModel(e.target.value)}
+                  >
+                    {stageDef.models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </ApSelect>
+                </div>
+              )}
+
+              {(() => {
+                const selectedModel = (stageDef.models ?? []).find(
+                  (m) => m.id === (stage.model ?? stageDef.default_model)
+                );
+                if (!selectedModel?.supports_prompt) return null;
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <Eyebrow>Prompt</Eyebrow>
+                    <textarea
+                      aria-label="Prompt"
+                      value={stage.config_overrides?.prompt ?? stageDef.default_config?.prompt ?? ''}
+                      onChange={(e) => setStagePrompt(e.target.value)}
+                      rows={3}
+                      spellCheck
+                      placeholder="e.g. What brand or text is visible in this image?"
+                      style={{
+                        fontFamily: AP.sans,
+                        fontSize: 12.5,
+                        lineHeight: 1.5,
+                        color: AP.ink,
+                        background: AP.card,
+                        border: `1px solid ${AP.line2}`,
+                        borderRadius: 9,
+                        padding: '9px 11px',
+                        outline: 'none',
+                        resize: 'vertical',
+                      }}
+                    />
+                  </div>
+                );
+              })()}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <Eyebrow>Config overrides (JSON)</Eyebrow>
@@ -1007,7 +957,6 @@ function ModelManagementView() {
         </div>
       </div>
 
-      {showNewNode && <NewNodeModal onCreate={handleCreateNode} onClose={() => setShowNewNode(false)} />}
     </div>
   );
 }
