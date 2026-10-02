@@ -18,9 +18,18 @@ This folder is maintained as an Obsidian-openable markdown knowledge base for Pi
 - [[Workspace Sharing & Access Control]] — workspace-level tenancy, RBAC (owner/editor/viewer), and per-workspace processing isolation (2026-05-30)
 - [[Remote Access — Tailscale]] — chosen approach for secure remote access to the local instance; planned, not yet implemented (2026-08-26)
 
+## Active engineering work
+
+- [[Stage Output UI Plan]] — component contracts, design tokens, and the full payload spec for all 16 output_types; decided 2026-09-03 (provider-naming, payload lock-in, Near Duplicates sequencing)
+- [[Pipeline Stage Reference]] — the 9 currently-implemented node types, verified against code: model/library, config status, I/O shape, how to add a new one (2026-09-03)
+- [[Stage Model Quality Audit]] — object detection / captioning / embedding stage correctness: "model"/"threshold" config is decorative on 3 executors, stock YOLO checkpoint has no "tiger" class (2026-09-02)
+- [[New Pipeline Stage Proposals]] — 22 new node-type proposals across 7 categories (scene/species/quality/safety/geometry/dedup/people/place), web-verified licenses & pricing; top 5 build-first picks (2026-09-03)
+
 ## Parked / exploratory
 
 - [[Cloud SaaS & On-Prem — Scope Exploration]] — what a public cloud SaaS + packaged on-prem offering would require; parked against the local-first thesis (2026-08-26)
+- [[DAG Branch-Level Parallelism (Tech Debt)]] — sibling pipeline branches execute correctly but sequentially, not concurrently; parked behind stage model quality (2026-09-02)
+- [[Vision Language Model — GPU Memory Fit (Parked)]] — Qwen2-VL-2B-Instruct and Moondream2 both exceed 4GB VRAM in fp16 (~115s/prompt, spills to shared memory); shipped as selectable models as-is, quantization deferred (2026-10-01)
 
 ## Diagrams
 
