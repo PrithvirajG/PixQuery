@@ -55,6 +55,13 @@ def is_cuda_oom(exc: BaseException) -> bool:
     return False
 
 
+def default_device() -> str:
+    """``"cuda"`` whenever CUDA exists; ``"cpu"`` only on a machine with no GPU at all."""
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def release_gpu_memory() -> None:
     """Drop unreachable tensors and hand cached CUDA blocks back to the driver."""
     gc.collect()

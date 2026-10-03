@@ -139,6 +139,15 @@ class ClassificationExecutor(BaseNodeExecutor):
     def __init__(self) -> None:
         # model id → (model, preprocess transform, category names)
         self._loaded: dict[str, tuple[Any, Any, list[str]]] = {}
+        self._device: str | None = None
+
+    @property
+    def device(self) -> str:
+        if self._device is None:
+            from src.infrastructure.ml.gpu import default_device
+
+            self._device = default_device()
+        return self._device
 
     def _load(self, model_id: str):
         if model_id not in self._loaded:
@@ -146,7 +155,9 @@ class ClassificationExecutor(BaseNodeExecutor):
 
             builder_name, weights_name = _CLASSIFIERS[model_id]
             weights = getattr(tvm, weights_name).DEFAULT
-            model = getattr(tvm, builder_name)(weights=weights).eval()
+            # Inference runs on the GPU (these are small — ≤ ~350MB — so they stay
+            # resident rather than going through GpuResidency).
+            model = getattr(tvm, builder_name)(weights=weights).eval().to(self.device)
             self._loaded[model_id] = (model, weights.transforms(), weights.meta["categories"])
         return self._loaded[model_id]
 
@@ -155,9 +166,9 @@ class ClassificationExecutor(BaseNodeExecutor):
 
         model, preprocess, categories = self._load(self.resolve_model(config).id)
         top_k = int(config.get("top_k", 5))
-        batch = preprocess(context["image"].convert("RGB")).unsqueeze(0)
+        batch = preprocess(context["image"].convert("RGB")).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            probs = torch.softmax(model(batch)[0], dim=0)
+            probs = torch.softmax(model(batch)[0], dim=0).cpu()
         top = torch.topk(probs, min(top_k, probs.shape[0]))
         labels = [
             {"label": categories[int(idx)], "confidence": float(score)}

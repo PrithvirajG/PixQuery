@@ -205,6 +205,292 @@ class HeavyVlmsShareTheGpuOneAtATimeTests(unittest.TestCase):
         )
 
 
+class _FakeHfModel:
+    """Records what a wrapper does to a freshly loaded model."""
+
+    def __init__(self):
+        self.moves, self.eval_called = [], False
+
+    def eval(self):
+        self.eval_called = True
+        return self
+
+    def to(self, device):
+        self.moves.append(device)
+        return self
+
+
+class VlmConstructorsKeepWeightsInHostMemoryTests(unittest.TestCase):
+    """Heavy VLMs load into host RAM and are moved to the GPU only inside
+    residency.use() — a constructor that did `.to("cuda")` would put two big models
+    on the card at load time, which is what ran the 4GB GPU out of memory."""
+
+    def _construct(self, cuda, patches, build):
+        model = _FakeHfModel()
+        loaders = {name: mock.Mock(return_value=model if name.endswith("model") else mock.Mock())
+                   for name in patches}
+        stack = [mock.patch("torch.cuda.is_available", return_value=cuda)]
+        stack += [mock.patch(target, loaders[name]) for name, target in patches.items()]
+        for ctx in stack:
+            ctx.start()
+            self.addCleanup(ctx.stop)
+        return build(), model, loaders
+
+    def test_qwen(self):
+        import torch
+
+        from src.infrastructure.ml.qwen_vl import Qwen2VLModel
+
+        for cuda, dtype in ((True, torch.float16), (False, torch.float32)):
+            with self.subTest(cuda=cuda):
+                wrapper, model, loaders = self._construct(
+                    cuda,
+                    {"processor": "transformers.AutoProcessor.from_pretrained",
+                     "model": "transformers.Qwen2VLForConditionalGeneration.from_pretrained"},
+                    Qwen2VLModel,
+                )
+                self.assertEqual(wrapper.device, "cuda" if cuda else "cpu")
+                self.assertEqual(model.moves, [])
+                self.assertTrue(model.eval_called)
+                self.assertEqual(loaders["model"].call_args.kwargs["torch_dtype"], dtype)
+
+    def test_moondream(self):
+        import torch
+
+        from src.infrastructure.ml.moondream import MoondreamModel
+
+        for cuda, dtype in ((True, torch.float16), (False, torch.float32)):
+            with self.subTest(cuda=cuda):
+                wrapper, model, loaders = self._construct(
+                    cuda,
+                    {"model": "transformers.AutoModelForCausalLM.from_pretrained",
+                     "tokenizer": "transformers.AutoTokenizer.from_pretrained"},
+                    MoondreamModel,
+                )
+                self.assertEqual(wrapper.device, "cuda" if cuda else "cpu")
+                self.assertEqual(model.moves, [])
+                self.assertTrue(loaders["model"].call_args.kwargs["trust_remote_code"])
+                self.assertEqual(loaders["model"].call_args.kwargs["torch_dtype"], dtype)
+
+    def test_blip(self):
+        import torch
+
+        from src.infrastructure.ml.blip import BlipModel
+
+        for cuda, dtype in ((True, torch.float16), (False, torch.float32)):
+            with self.subTest(cuda=cuda):
+                wrapper, model, loaders = self._construct(
+                    cuda,
+                    {"processor": "src.infrastructure.ml.blip.BlipProcessor.from_pretrained",
+                     "model": "src.infrastructure.ml.blip.BlipForConditionalGeneration.from_pretrained"},
+                    BlipModel,
+                )
+                self.assertEqual((wrapper.device, wrapper.dtype), ("cuda" if cuda else "cpu", dtype))
+                self.assertEqual(model.moves, [])
+                self.assertEqual(loaders["model"].call_args.kwargs["torch_dtype"], dtype)
+
+    def test_dinov2_is_small_so_it_goes_straight_to_the_device(self):
+        from src.infrastructure.ml.dinov2 import Dinov2Model
+
+        wrapper, model, _ = self._construct(
+            True,
+            {"processor": "transformers.AutoImageProcessor.from_pretrained",
+             "model": "transformers.AutoModel.from_pretrained"},
+            Dinov2Model,
+        )
+        self.assertEqual((wrapper.device, model.moves, model.eval_called), ("cuda", ["cuda"], True))
+
+
+class YoloAndClipSetupTests(unittest.TestCase):
+    def test_yolo_loads_the_given_weights(self):
+        from src.infrastructure.ml import yolo
+
+        with mock.patch.object(yolo, "YOLO") as ultralytics:
+            model = yolo.YoloModel(model_path="w.pt")
+        ultralytics.assert_called_once_with("w.pt")
+        self.assertIs(model.model, ultralytics.return_value)
+
+    def test_yolo_writes_an_annotated_copy_of_the_image(self):
+        from src.infrastructure.ml.yolo import YoloModel
+
+        yolo_model = YoloModel.__new__(YoloModel)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.png")
+            yolo_model.write_image_with_detections(
+                red_image((40, 40)), [{"label": "cat", "confidence": 0.9, "bbox": [20, 20, 10, 10]}], out
+            )
+            self.assertTrue(os.path.getsize(out) > 0)
+
+    def test_clip_loads_on_cuda_when_available(self):
+        from src.infrastructure.ml import clip as clip_module
+
+        with mock.patch("torch.cuda.is_available", return_value=True), \
+                mock.patch.object(clip_module.clip, "load", return_value=("model", "pre")) as load:
+            model = clip_module.ClipModel("ViT-B/32")
+        load.assert_called_once_with("ViT-B/32", device="cuda")
+        self.assertEqual((model.device, model.model, model.preprocess), ("cuda", "model", "pre"))
+
+    def test_get_clip_model_loads_each_variant_once(self):
+        from src.infrastructure.ml import clip as clip_module
+
+        clip_module.get_clip_model.cache_clear()
+        self.addCleanup(clip_module.get_clip_model.cache_clear)
+        with mock.patch.object(clip_module, "ClipModel") as cls:
+            first = clip_module.get_clip_model("ViT-B/32")
+            again = clip_module.get_clip_model("ViT-B/32")
+            clip_module.get_clip_model("ViT-L/14")
+        self.assertIs(first, again)
+        self.assertEqual(cls.call_count, 2)
+
+
+class LazyExportsTests(unittest.TestCase):
+    def test_package_level_exports_resolve_lazily_and_unknown_names_raise(self):
+        import importlib
+
+        expected = {
+            "src.infrastructure.ml": ["BlipModel", "ClipModel", "YoloModel", "ModelInterface"],
+            "src.consumer.processing": ["ImageProcessorConsumer", "FileObservationConsumer", "start_pipeline_worker"],
+            "src.consumer.ingestion": ["ImageEventHandler", "WorkspaceWatcher", "start_file_watcher"],
+            "src.consumer.events": ["EventConsumer"],
+        }
+        for module_name, names in expected.items():
+            module = importlib.import_module(module_name)
+            for name in names:
+                with self.subTest(module=module_name, name=name):
+                    self.assertIsNotNone(getattr(module, name))
+            with self.subTest(module=module_name, name="missing"):
+                with self.assertRaises(AttributeError):
+                    getattr(module, "definitely_not_exported")
+
+
+class DefaultDeviceTests(unittest.TestCase):
+    def test_cuda_when_available_cpu_only_without_a_gpu(self):
+        from src.infrastructure.ml.gpu import default_device
+
+        with mock.patch("torch.cuda.is_available", return_value=True):
+            self.assertEqual(default_device(), "cuda")
+        with mock.patch("torch.cuda.is_available", return_value=False):
+            self.assertEqual(default_device(), "cpu")
+
+
+class ClassificationUsesTheGpuTests(unittest.TestCase):
+    def _executor(self, device):
+        from src.services.executors.builtin import ClassificationExecutor
+
+        stage = ClassificationExecutor()
+        stage._device = device
+        return stage
+
+    def test_model_is_moved_to_the_device_when_loaded(self):
+        import torchvision.models as tvm
+
+        log = []
+
+        class FakeNet:
+            def eval(self):
+                return self
+
+            def to(self, device):
+                log.append(device)
+                return self
+
+        weights = SimpleNamespace(
+            DEFAULT=SimpleNamespace(transforms=lambda: "preprocess", meta={"categories": ["a", "b"]})
+        )
+        stage = self._executor("cuda")
+        with mock.patch.object(tvm, "efficientnet_b0", lambda weights: FakeNet()), \
+                mock.patch.object(tvm, "EfficientNet_B0_Weights", weights):
+            model, preprocess, categories = stage._load("efficientnet_b0")
+            stage._load("efficientnet_b0")  # cached — must not move/build again
+
+        self.assertEqual(log, ["cuda"])
+        self.assertEqual((preprocess, categories), ("preprocess", ["a", "b"]))
+
+    def test_input_batch_is_sent_to_the_model_device(self):
+        import torch
+
+        seen = {}
+
+        class Net:
+            def __call__(self, batch):
+                seen["device"] = batch.device.type
+                return torch.tensor([[0.0, 2.0]])
+
+        stage = self._executor("cpu")
+        stage._loaded["efficientnet_b0"] = (Net(), lambda image: torch.zeros(3, 4, 4), ["a", "b"])
+        out = stage.run({"image": red_image()}, {"top_k": 1})
+        self.assertEqual(seen["device"], "cpu")
+        self.assertEqual(out["labels"][0]["label"], "b")
+
+    def test_device_is_resolved_lazily_from_default_device(self):
+        from src.services.executors.builtin import ClassificationExecutor
+
+        with mock.patch("src.infrastructure.ml.gpu.default_device", return_value="cuda") as dd:
+            stage = ClassificationExecutor()
+            self.assertEqual((stage.device, stage.device), ("cuda", "cuda"))
+        dd.assert_called_once()
+
+
+class Dinov2UsesTheGpuTests(unittest.TestCase):
+    def test_inputs_go_to_the_device_and_the_vector_comes_back_as_numpy(self):
+        import torch
+
+        from src.infrastructure.ml.dinov2 import Dinov2Model
+
+        sent = {}
+
+        class Inputs(dict):
+            def to(self, device):
+                sent["device"] = device
+                return self
+
+        dino = Dinov2Model.__new__(Dinov2Model)
+        dino.device, dino.logger = "cpu", mock.Mock()
+        dino.processor = lambda images, return_tensors: Inputs(pixel_values=torch.zeros(1))
+        dino.model = lambda **kw: SimpleNamespace(pooler_output=torch.ones(1, 768))
+        vec = dino.embed(red_image())
+        self.assertEqual(sent["device"], "cpu")
+        self.assertEqual(vec.shape, (768,))
+        self.assertIsInstance(vec, np.ndarray)
+
+    def test_text_embedding_is_not_supported(self):
+        from src.infrastructure.ml.dinov2 import Dinov2Model
+
+        with self.assertRaises(NotImplementedError):
+            Dinov2Model.__new__(Dinov2Model).embed_text("x")
+
+
+class ScrfdProviderGuardTests(unittest.TestCase):
+    """A GPU machine with only the CPU onnxruntime must not silently run on the CPU."""
+
+    def _build(self, providers, cuda):
+        import onnxruntime
+
+        fake_app = mock.MagicMock()
+        with mock.patch.object(onnxruntime, "get_available_providers", return_value=providers), \
+                mock.patch("src.infrastructure.ml.face_detectors._cuda_available", return_value=cuda), \
+                mock.patch("insightface.app.FaceAnalysis", fake_app):
+            ScrfdFaceDetector()
+        return fake_app
+
+    def test_gpu_present_but_cpu_only_onnxruntime_fails_permanently(self):
+        from src.errors.executors import PermanentNodeError
+
+        with self.assertRaises(PermanentNodeError) as cm:
+            self._build(["CPUExecutionProvider"], cuda=True)
+        self.assertIn("onnxruntime-gpu", str(cm.exception))
+
+    def test_cuda_provider_is_preferred_when_available(self):
+        app = self._build(["CUDAExecutionProvider", "CPUExecutionProvider"], cuda=True)
+        self.assertEqual(
+            app.call_args.kwargs["providers"], ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+
+    def test_a_machine_with_no_gpu_still_runs_on_the_cpu(self):
+        app = self._build(["CPUExecutionProvider"], cuda=False)
+        self.assertEqual(app.call_args.kwargs["providers"], ["CPUExecutionProvider"])
+
+
 class BlipUsesTheGpuTests(unittest.TestCase):
     def test_describe_moves_blip_to_the_gpu_and_sends_inputs_there_in_its_dtype(self):
         from src.infrastructure.ml import blip as blip_module, gpu

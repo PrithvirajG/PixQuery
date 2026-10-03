@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 from src.config import MODEL_CACHE_DIR
+from src.errors.executors import PermanentNodeError
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -103,6 +104,15 @@ class ScrfdFaceDetector:
 
             if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
                 providers.insert(0, "CUDAExecutionProvider")
+            elif _cuda_available():
+                # A GPU exists but this is the CPU-only onnxruntime build: running
+                # anyway would silently put the model on the CPU. Fail loudly instead.
+                raise PermanentNodeError(
+                    "SCRFD needs the GPU build of ONNX Runtime but only the CPU build is "
+                    "installed (providers: %s). Install onnxruntime-gpu in place of "
+                    "onnxruntime, or pick another face-detection model."
+                    % onnxruntime.get_available_providers()
+                )
         except ImportError:
             pass
         self._app = FaceAnalysis(name=self.PACK, allowed_modules=["detection"], providers=providers)

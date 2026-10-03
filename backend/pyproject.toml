@@ -68,4 +68,4 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
-fail_under = 83
+fail_under = 91
