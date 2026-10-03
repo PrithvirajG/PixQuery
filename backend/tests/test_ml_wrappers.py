@@ -205,6 +205,29 @@ class HeavyVlmsShareTheGpuOneAtATimeTests(unittest.TestCase):
         )
 
 
+class BlipUsesTheGpuTests(unittest.TestCase):
+    def test_describe_moves_blip_to_the_gpu_and_sends_inputs_there_in_its_dtype(self):
+        from src.infrastructure.ml import blip as blip_module, gpu
+
+        log, sent = [], {}
+        inputs = _Inputs()
+        inputs.to = lambda device, dtype=None: sent.update(device=device, dtype=dtype) or inputs
+
+        blip = blip_module.BlipModel.__new__(blip_module.BlipModel)
+        blip.device, blip.dtype, blip.logger = "cuda", "fp16-marker", mock.Mock()
+        blip.model = SimpleNamespace(to=_Recorder("blip", log).to, generate=lambda **kw: [[1, 2]])
+        blip.processor = mock.MagicMock()
+        blip.processor.return_value = inputs
+        blip.processor.decode.return_value = "a cat"
+
+        with mock.patch.object(gpu, "release_gpu_memory"), \
+                mock.patch.object(blip_module, "residency", gpu.GpuResidency()):
+            self.assertEqual(blip.describe(red_image()), "a cat")
+
+        self.assertEqual(log, [("blip", "cuda")])
+        self.assertEqual(sent, {"device": "cuda", "dtype": "fp16-marker"})
+
+
 class WrappersPropagateFailuresTests(unittest.TestCase):
     """A swallowed model error used to become an empty caption / missing embedding on a
     job that then read "completed" and was never retried. Each wrapper must raise."""
@@ -242,6 +265,7 @@ class WrappersPropagateFailuresTests(unittest.TestCase):
 
         blip = BlipModel.__new__(BlipModel)
         blip.processor, blip.logger = self._boom, mock.Mock()
+        blip.device, blip.dtype, blip.model = "cpu", None, mock.Mock()
         with self.assertRaises(RuntimeError):
             blip.describe(red_image())
 
